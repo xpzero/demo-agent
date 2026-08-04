@@ -200,15 +200,140 @@ messages.append({
 
 最后 `if not calls: return`——没有工具调用说明模型给的是最终回复，本轮结束。
 
+### V5 · 文件读写工具
+
+目标：让 Agent 能真正操作文件，同时把工具体系整理成可扩展的结构。
+
+#### 工具分发：字典映射 + 统一兜底
+
+工具变多后 `if/elif` 就不合适了，改成字典分发，`execute_tool` 只负责查表、调用、兜异常：
+
+```python
+def execute_tool(name: str, args: dict) -> str:
+    handler = TOOL_HANDLERS.get(name)
+    if handler is None:
+        return f"未知工具：{name}"
+
+    try:
+        return handler(args)
+    except Exception as e:
+        return f"{name} 执行出错：{e}"
+```
+
+这里捕获所有异常是**刻意的**：`args` 由模型生成，字段缺失、路径越界、表达式非法都可能发生。把错误转成文本回传，模型下一轮就能看到原因并自行纠正；若直接抛出，整个 agent 循环会崩。
+
+```
+缺字段:      calculate 执行出错：'expression'
+非法表达式:  calculate 执行出错：invalid syntax (<string>, line 1)
+未知工具:    未知工具：foo
+```
+
+#### 目录拆分：一个工具一个文件
+
+```
+tools/
+├── __init__.py      # 登记模块，汇总 TOOLS / TOOL_HANDLERS
+├── paths.py         # 共享的路径校验
+├── calculate.py
+├── get_weather.py
+├── read_file.py
+└── write_file.py
+```
+
+每个工具文件导出两样东西——`SCHEMA`（给模型的声明）和 `run(args)`（实现）。声明与实现放在同一个文件，就不会出现「加了实现忘了加声明」。
+
+`__init__.py` 里工具名直接从 `SCHEMA` 提取，不再手写第二遍：
+
+```python
+MODULES = (calculate, get_weather, read_file, write_file)
+
+TOOLS = [module.SCHEMA for module in MODULES]
+TOOL_HANDLERS = {module.SCHEMA["function"]["name"]: module.run for module in MODULES}
+```
+
+#### 路径安全：必须限定边界
+
+`path` 是模型生成的不可信输入。不加限制，它就能读 `~/.ssh/id_rsa` 或覆盖任意文件。`tools/paths.py` 做两层校验：
+
+```python
+ROOT = Path(__file__).resolve().parent.parent   # 根目录固定为项目目录
+BLOCKED = {".env", ".git"}
+
+def resolve(path: str) -> Path:
+    target = (ROOT / path).resolve()            # resolve 会展开 .. 与符号链接
+
+    if not target.is_relative_to(ROOT):
+        raise ValueError(f"路径越界，只能访问项目目录内的文件：{path}")
+
+    relative = target.relative_to(ROOT)
+    if relative.parts and relative.parts[0] in BLOCKED:
+        raise ValueError(f"该路径禁止访问：{path}")
+
+    return target
+```
+
+- **先 `resolve()` 再判断**：`..` 和符号链接都会被展开成真实路径，绕不过去
+- **屏蔽 `.env`**：里面是 API key。一旦被 `read_file` 读出来，就会作为 tool 结果进入 messages，随下一次请求发给服务端
+- **屏蔽 `.git`**：避免仓库元数据被改写
+
+效果：
+
+```
+越界:      read_file 执行出错：路径越界，只能访问项目目录内的文件：../../etc/hosts
+绝对路径:  read_file 执行出错：路径越界，只能访问项目目录内的文件：/etc/hosts
+黑名单:    read_file 执行出错：该路径禁止访问：.env
+```
+
+#### 怎么用
+
+不需要写任何调用代码，直接用自然语言说，模型自己决定调哪个工具：
+
+```
+$ uv run main.py
+Agent 已启动，输入 quit 退出
+你: 在 notes 目录下建一个 hello.md，内容写一句项目介绍
+  [工具调用] write_file({'content': '这是一个用于演示和实践的项目……', 'path': 'notes/hello.md'})
+  [返回结果] 已写入 notes/hello.md（37 字符）
+Agent: 已在 `notes/hello.md` 中写入项目介绍。
+
+你: 读一下 tools/calculate.py，告诉我它导出了什么
+  [工具调用] read_file({'path': 'tools/calculate.py'})
+Agent: 导出了 SCHEMA（描述 calculate 工具及其 expression 参数）和 run(args)……
+```
+
+`write_file` 会自动创建缺失的父目录，文件已存在则**直接覆盖**，没有确认环节。
+
+#### 新增一个工具
+
+1. 在 `tools/` 下建文件，导出 `SCHEMA` 和 `run(args)`
+2. 在 `tools/__init__.py` 的 `MODULES` 里加上这个模块
+
+没有第三步——`TOOLS` 和 `TOOL_HANDLERS` 都是自动派生的。
+
 ## 当前结构
 
 ```
 demo-agent/
-├── main.py      # 入口，只负责启动
-├── agent.py     # 对话流程与 agent loop
-├── tools.py     # 工具声明 + 实现
-└── .env         # API key 与 base url
+├── main.py          # 入口，只负责启动
+├── agent.py         # 对话流程与 agent loop
+├── tools/           # 工具集合，一个工具一个文件
+│   ├── __init__.py  # 登记模块，汇总 TOOLS / TOOL_HANDLERS
+│   ├── paths.py     # 文件类工具共享的路径校验
+│   ├── calculate.py
+│   ├── get_weather.py
+│   ├── read_file.py
+│   └── write_file.py
+└── .env             # API key 与 base url
 ```
+
+现有工具：
+
+| 工具 | 作用 |
+|---|---|
+| `calculate` | 计算数学表达式 |
+| `get_weather` | 查天气（写死的假数据） |
+| `read_file` | 读项目内文件 |
+| `write_file` | 写项目内文件，自动建父目录，已存在则覆盖 |
 
 `agent.py` 内的分工：
 
@@ -237,6 +362,7 @@ chat(stream=True)   # 流式
 
 ## 已知问题
 
-- `tools.py` 用 `eval()` 执行模型给的表达式，等于任意代码执行，仅适用于本地学习，不能上线
+- `tools/calculate.py` 用 `eval()` 执行模型给的表达式，等于任意代码执行，仅适用于本地学习，不能上线
+- `write_file` 直接覆盖已有文件，没有确认或备份环节，改坏了只能靠 git 找回
 - 没有上下文长度控制，多轮对话久了会超出 token 上限
 - 没有请求重试和错误处理
