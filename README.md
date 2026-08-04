@@ -106,24 +106,99 @@ TOOLS = [
 
 目标：文本边生成边打印，消除长回复的等待感。
 
-只需给请求加 `stream=True`，但处理方式变化不小：
+只需给请求加 `stream=True`，但处理方式变化不小。
 
-```python
-for chunk in stream:
-    delta = chunk.choices[0].delta
+#### 流式的本质
 
-    if delta.content:                      # 文本 → 实时打印
-        print(delta.content, end="", flush=True)
+非流式返回一个**完整对象**；流式返回一串 **chunk**，每个 chunk 只带「这一小步新增了什么」，即 `delta`。所以取值是 `chunk.choices[0].delta`，不是 `.message`。
 
-    for tc in delta.tool_calls or []:      # 工具调用 → 跨 chunk 拼接
-        ...
+`delta` 有三种形态：只有文本、只有工具调用片段、什么都没有（收尾那个带 `finish_reason` 的 chunk）。因此两个分支都得写成「有才处理」。
+
+实际抓到的序列（本项目所用网关）：
+
+```
+chunk[0]  tool_call(index=0, id='call_CxY3...', name='get_weather', args='{"city":"北京"}')
+chunk[1]  tool_call(index=0, id='call_ahWJ...', name='calculate',   args='{"expression":"(38-12)*3"}')
+chunk[2]  finish='stop'  (空)
 ```
 
-要点：
+#### 文本：边打印边留副本
 
-- 流式下**没有现成的 message 对象**，要自己把 `content` 和 `tool_calls` 拼成一条 assistant 消息回填上下文
-- 工具调用的 `arguments` 是被切成多个 chunk 逐段送来的，必须累加完整才能 `json.loads`
-- ⚠️ 标准实现中每个工具调用有递增的 `index`，但**实测本项目使用的网关对多个调用一律返回 `index=0`**。按 index 归拢会把两个调用的参数拼成非法 JSON（报 `Extra data`）。改用「出现新的 `id` 就是一个新调用」来划分边界，对两种实现都成立
+```python
+if delta.content:
+    if not content:
+        print("Agent: ", end="", flush=True)   # 首片段才打前缀
+    print(delta.content, end="", flush=True)   # 实时输出
+    content += delta.content                   # 同时攒完整文本
+```
+
+打印是给人看的，`content` 是给模型看的——结束后要把完整文本回填 `messages`，所以两份都要留。`end=""` 去掉自动换行，`flush=True` 强制立刻输出，否则会被缓冲攒住、流式效果消失。
+
+#### 工具调用：归拢碎片
+
+一个工具调用会被拆到多个 chunk。标准 OpenAI 的形态是：
+
+```
+chunk0  id='call_A'  name='get_weather'  args=''
+chunk1  id=None      name=None           args='{"ci'
+chunk2  id=None      name=None           args='ty":"北'
+chunk3  id=None      name=None           args='京"}'
+chunk4  id='call_B'  name='calculate'    args=''      ← 换调用了
+```
+
+只有**首个片段带 `id` 和 `name`**，后续片段只有 `arguments` 的一截。所以要维护一个「进行中的调用」列表：
+
+```python
+for tc in delta.tool_calls or []:
+    # ① 没见过的 id → 开一条新记录
+    if not calls or (tc.id and all(c["id"] != tc.id for c in calls)):
+        calls.append({"id": tc.id or "", "name": "", "arguments": ""})
+
+    # ② 找到这个片段该归到哪条记录
+    slot = next((c for c in calls if tc.id and c["id"] == tc.id), calls[-1])
+
+    # ③ 原地写入
+    if tc.function and tc.function.name:
+        slot["name"] = tc.function.name              # 覆盖，name 不会被切碎
+    if tc.function and tc.function.arguments:
+        slot["arguments"] += tc.function.arguments   # 累加，参数是碎片
+```
+
+按上面的标准形态推演：
+
+| chunk | 动作 | `calls` 状态 |
+|---|---|---|
+| 0 | `call_A` 没见过 → 新建 | `[{A, get_weather, ""}]` |
+| 1 | 无 id → 落到 `calls[-1]` | `[{A, get_weather, '{"ci'}]` |
+| 2 | 同上 | `[{A, ..., '{"city":"北'}]` |
+| 3 | 同上 | `[{A, ..., '{"city":"北京"}'}]` ← 完整 |
+| 4 | `call_B` 没见过 → 新建 | `[{A...}, {B, calculate, ""}]` |
+
+几个易错点：
+
+- **`arguments` 必须 `+=` 不能 `=`**：碎片被覆盖后只剩最后一截，`json.loads` 必然报错。而 `name` 相反，首片段一次给全，直接赋值
+- **不存在「调用结束」信号**，也不需要。`slot` 是字典的**引用**，写 `slot` 就是写进 `calls`，属于原地增量更新，循环退出时每条自然都是完整的
+- **`or []`**：纯文本 chunk 里 `delta.tool_calls` 是 `None`，直接迭代会 `TypeError`
+- ⚠️ 标准实现中每个工具调用有递增的 `index`，但**实测本项目使用的网关对多个调用一律返回 `index=0`**。按 index 归拢会把两串参数拼成 `{"city":"北京"}{"expression":"..."}` → 报 `Extra data`。改成按 `id` 归拢，不依赖 `index`，也不怕片段交错送达
+- `id` 是「每次调用」唯一而非「每个工具」唯一，所以同一个工具被连续调用两次会得到两条独立记录，不会被误合并
+
+> Chat Completions 的流式实际是顺序的（一个调用的片段送完才开始下一个），只跟 `calls[-1]` 比也能跑通。但协议未明文保证不交错，且已见到该网关不遵守 `index` 惯例，按 `id` 查属于零成本的防御。
+
+#### 收尾：重建 assistant 消息
+
+流式没有现成的 message 对象，必须按非流式的结构自己拼一条塞回上下文：
+
+```python
+messages.append({
+    "role": "assistant",
+    "content": content or None,
+    "tool_calls": [{"id": ..., "type": "function", "function": {...}} for slot in calls],
+})
+```
+
+**这一步不能省**。下一轮请求时，模型靠上下文里这条消息才知道自己发起过哪些调用；紧随其后的 `role="tool"` 消息也靠 `tool_call_id` 与它对应。缺了它 API 会因 tool 消息找不到归属而报错。
+
+最后 `if not calls: return`——没有工具调用说明模型给的是最终回复，本轮结束。
 
 ## 当前结构
 
