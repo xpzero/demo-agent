@@ -10,7 +10,7 @@ SCHEMA = {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "相对项目根目录的路径，例如 tools/calculate.py",
+                    "description": "相对项目根目录的路径，例如 tools/files/read.py",
                 },
             },
             "required": ["path"],

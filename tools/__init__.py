@@ -1,9 +1,9 @@
-"""工具集合：每个工具一个模块，各自导出 SCHEMA（声明）与 run（实现）。"""
+"""工具集合：一个工具一个文件，按领域分子包，各模块导出 SCHEMA（声明）与 run（实现）。"""
 
-from . import calculate, get_weather, read_file, write_file
+from . import calculate, files, get_weather, web
 
-# 新增工具时只需在此登记模块，声明与实现都从模块里取，不会出现两处不同步
-MODULES = (calculate, get_weather, read_file, write_file)
+# 新增工具时在对应子包的 MODULES 里登记；工具名与实现都从模块的 SCHEMA 取，不会两处不同步
+MODULES = (calculate, get_weather, *files.MODULES, *web.MODULES)
 
 TOOLS = [module.SCHEMA for module in MODULES]
 

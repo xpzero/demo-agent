@@ -1,7 +1,8 @@
 from pathlib import Path
 
 # 文件工具的根目录固定为项目目录，模型只能在此范围内读写
-ROOT = Path(__file__).resolve().parent.parent
+# 层级：paths.py → files/ → tools/ → 项目根
+ROOT = Path(__file__).resolve().parents[2]
 
 # 禁止访问的路径：.env 含 API key，读出来会被带进模型上下文；.git 是仓库元数据
 BLOCKED = {".env", ".git"}
