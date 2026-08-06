@@ -10,3 +10,6 @@ wheels/
 .venv
 
 .env
+
+# 会话数据（含完整对话内容）
+.sessions/
