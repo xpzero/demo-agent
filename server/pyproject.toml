@@ -5,9 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.141.1",
     "openai>=2.53.0",
     "python-dotenv>=1.2.2",
     "tavily-python>=0.7.27",
+    "uvicorn>=0.52.1",
 ]
 
 [tool.pyright]
