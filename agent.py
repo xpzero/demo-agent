@@ -108,8 +108,9 @@ def run_tool_loop_stream(messages: list, max_turns: int = 10) -> None:
         if content:
             print()
 
-        # 没有工具调用 → 任务完成
+        # 没有工具调用 → 模型给出了最终回复，与非流式一样要写回上下文
         if not calls:
+            messages.append({"role": "assistant", "content": content})
             return
 
         # 流式拿不到现成的 message 对象，需按非流式的结构自己拼一条 assistant 消息，
