@@ -7,7 +7,7 @@
 - Python 3.12+，依赖用 [uv](https://github.com/astral-sh/uv) 管理
 - 核心依赖：`openai`、`python-dotenv`、`tavily-python`（联网搜索）
 
-项目根目录创建 `.env`：
+项目 `server/` 目录下创建 `.env`：
 
 ```
 OPENAI_API_KEY=sk-xxx
@@ -18,6 +18,7 @@ TAVILY_API_KEY=tvly-xxx        # 仅联网搜索工具需要
 运行：
 
 ```bash
+cd server
 uv sync
 uv run main.py
 ```
@@ -502,24 +503,31 @@ ReAct 强制模型每步先写出推理再行动，本项目没有这个要求�
 
 ## 当前结构
 
+前后端各占一个目录，依赖各自独立管理（`server/` 用 uv，`web/` 用 pnpm），不引入 workspace 工具。
+
 ```
 demo-agent/
-├── main.py              # 入口，只负责启动
-├── agent.py             # 对话流程与 agent loop
-├── tools/               # 工具集合，一个工具一个文件，按领域分子包
-│   ├── __init__.py      # 聚合各子包的 MODULES，提供 execute_tool
-│   ├── calculate.py
-│   ├── get_weather.py
-│   ├── files/           # 文件类
-│   │   ├── paths.py     # 路径校验
-│   │   ├── read.py
-│   │   └── write.py
-│   └── web/             # 联网类
-│       ├── client.py    # Tavily 客户端、截断、不可信标注
-│       ├── search.py
-│       └── fetch.py
-└── .env                 # API key 与 base url
+├── server/                  # 后端：Agent 本体（Python / uv）
+│   ├── main.py              # CLI 入口
+│   ├── agent/               # 模型交互
+│   │   ├── client.py        # OpenAI 客户端、MODEL、SYSTEM_PROMPT
+│   │   ├── loop.py          # agent loop（流式 / 非流式）
+│   │   └── chat.py          # run_agent / chat 交互入口
+│   ├── sessions/            # 多会话管理与持久化
+│   │   ├── session.py       # 会话容器
+│   │   ├── manager.py       # 加载、新建、切换、删除、保存
+│   │   └── commands.py      # /new /list /switch /del
+│   ├── tools/               # 工具集合，一个工具一个文件，按领域分子包
+│   │   ├── calculate.py
+│   │   ├── get_weather.py
+│   │   ├── files/           # 文件类（paths.py 做路径校验）
+│   │   └── web/             # 联网类（client.py 含截断与不可信标注）
+│   ├── .env                 # API key 与 base url
+│   └── .sessions/           # 会话数据（git 忽略）
+└── web/                     # 前端（规划中）：Vite + React + assistant-ui
 ```
+
+文件工具的根目录限定在 `server/` 内——Agent 读写不到 `web/` 与仓库根。
 
 现有工具：
 
@@ -527,12 +535,12 @@ demo-agent/
 |---|---|
 | `calculate` | 计算数学表达式 |
 | `get_weather` | 查天气（写死的假数据） |
-| `read_file` | 读项目内文件 |
-| `write_file` | 写项目内文件，自动建父目录，已存在则覆盖 |
+| `read_file` | 读 server 目录内文件 |
+| `write_file` | 写 server 目录内文件，自动建父目录，已存在则覆盖 |
 | `web_search` | 联网搜索，返回标题、链接、摘要 |
 | `fetch_url` | 抓取网页正文 |
 
-`agent.py` 内的分工：
+`agent/` 包内的分工：
 
 | 函数 | 职责 |
 |---|---|
@@ -540,7 +548,7 @@ demo-agent/
 | `run_tool_loop` | 非流式 agent loop |
 | `run_tool_loop_stream` | 流式 agent loop |
 | `run_agent(user_input)` | 单次任务，跑完就结束 |
-| `chat()` | 多轮交互式对话 |
+| `chat()` | 多轮交互式对话，接入 `sessions/` 的多会话管理 |
 
 流式与非流式的返回结构不同，通过把工具调用统一成 `(id, name, arguments)` 三元组，让 `execute_tool_calls` 得以共用。
 
