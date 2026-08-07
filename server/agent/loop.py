@@ -28,9 +28,10 @@ def stream_events(messages: list, max_turns: int = 10) -> Iterator[dict]:
         )
 
         content = ""
-        # 工具调用会被拆散在多个 chunk 里；部分网关对多个调用一律返回 index=0，
-        # 因此按 id 归拢：id 相同即同一个调用，不依赖 index，也不怕片段交错送达
-        calls: list[dict] = []
+        # 按 index 归拢分片，与官方 SDK 一致：index 是 tool_calls 数组的下标，
+        # 官方视其为必填并据此定位（openai/lib/streaming/_deltas.py 缺失即报错）。
+        # 用 dict 而非 list，是为了容忍多个调用的分片交错到达
+        calls: dict[int, dict] = {}
 
         for chunk in stream:
             # 每个 chunk 只携带增量，所以取 delta 而不是 message
@@ -42,12 +43,10 @@ def stream_events(messages: list, max_turns: int = 10) -> Iterator[dict]:
 
             # 为 None 说明这个 chunk 不含工具调用信息
             for tc in delta.tool_calls or []:
-                # 出现没见过的 id 就是一个新调用（同一个工具被调多次时 id 也不同）
-                if not calls or (tc.id and all(c["id"] != tc.id for c in calls)):
-                    calls.append({"id": tc.id or "", "name": "", "arguments": ""})
-
-                # 带 id 的片段归回它自己的调用，不带 id 的归到最近一个调用
-                slot = next((c for c in calls if tc.id and c["id"] == tc.id), calls[-1])
+                slot = calls.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
+                # id 与 name 只在首个分片出现，出现即取
+                if tc.id:
+                    slot["id"] = tc.id
                 if tc.function and tc.function.name:
                     slot["name"] = tc.function.name
                 if tc.function and tc.function.arguments:
@@ -59,6 +58,9 @@ def stream_events(messages: list, max_turns: int = 10) -> Iterator[dict]:
             messages.append({"role": "assistant", "content": content})
             yield {"type": "done", "content": content}
             return
+
+        # dict 不保证遍历顺序反映 index 大小，按 index 排序还原调用顺序
+        ordered = [calls[index] for index in sorted(calls)]
 
         # 流式拿不到现成的 message 对象，需按非流式的结构自己拼一条 assistant 消息，
         # 否则下一轮请求时模型不知道自己发起过哪些调用，后面的 tool 消息也无从对应
@@ -72,12 +74,12 @@ def stream_events(messages: list, max_turns: int = 10) -> Iterator[dict]:
                         "type": "function",
                         "function": {"name": slot["name"], "arguments": slot["arguments"]},
                     }
-                    for slot in calls
+                    for slot in ordered
                 ],
             }
         )
 
-        for slot in calls:
+        for slot in ordered:
             args = json.loads(slot["arguments"])
             yield {"type": "tool_call", "id": slot["id"], "name": slot["name"], "args": args}
 
