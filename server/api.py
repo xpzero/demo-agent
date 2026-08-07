@@ -5,8 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from agent import SYSTEM_PROMPT
-from agent.loop import stream_events
+from agent import SYSTEM_PROMPT, stream_events
 from sessions import SessionManager
 
 app = FastAPI(title="demo-agent")

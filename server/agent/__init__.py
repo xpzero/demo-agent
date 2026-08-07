@@ -1,6 +1,6 @@
-"""Agent 的模型交互与命令行入口。"""
+"""Agent 内核：模型客户端与 agent loop，只产出事件，不负责呈现。"""
 
-from .chat import chat, run_agent
 from .client import MODEL, SYSTEM_PROMPT, client
+from .loop import stream_events
 
-__all__ = ["MODEL", "SYSTEM_PROMPT", "chat", "client", "run_agent"]
+__all__ = ["MODEL", "SYSTEM_PROMPT", "client", "stream_events"]
