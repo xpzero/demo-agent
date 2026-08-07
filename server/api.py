@@ -6,7 +6,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from agent import SYSTEM_PROMPT, stream_events
+from logging_setup import setup_logging
 from sessions import SessionManager
+
+# uvicorn 先配好自己的日志再导入本模块，放在这里设置才不会被它覆盖
+setup_logging()
 
 app = FastAPI(title="demo-agent")
 
