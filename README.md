@@ -7,19 +7,46 @@
 - Python 3.12+，依赖用 [uv](https://github.com/astral-sh/uv) 管理
 - 核心依赖：`openai`、`python-dotenv`、`tavily-python`（联网搜索）
 
-项目 `server/` 目录下创建 `.env`：
+### 一条命令初始化前后端
+
+在项目根目录执行：
+
+```bash
+make init
+```
+
+该命令会：
+
+- 若不存在则从 `server/.env.example` 创建 `server/.env`（绝不覆盖已有配置）
+- 在 `server/` 执行 `uv sync --locked`
+- 在 `web/` 执行 `pnpm install --frozen-lockfile`
+
+随后填写项目 `server/` 目录下的 `.env`：
 
 ```
 OPENAI_API_KEY=sk-xxx
-OPENAI_BASE_URL=https://your-gateway
+OPENAI_BASE_URL=https://your-gateway  # 使用自定义网关时填写；官方 API 可留空
 TAVILY_API_KEY=tvly-xxx        # 仅联网搜索工具需要
 ```
 
-运行：
+启动网页模式时，在两个终端分别运行：
 
 ```bash
 cd server
-uv sync
+uv run uvicorn api:app --reload --host 127.0.0.1 --port 8000
+```
+
+```bash
+cd web
+pnpm dev
+```
+
+浏览器访问 Vite 输出的地址（默认 `http://localhost:5173`）。
+
+只使用命令行 Agent 时：
+
+```bash
+cd server
 uv run main.py
 ```
 
