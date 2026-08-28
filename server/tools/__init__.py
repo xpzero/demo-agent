@@ -7,7 +7,7 @@ MODULES = (calculate, get_weather, *files.MODULES, *web.MODULES)
 
 TOOLS = [module.SCHEMA for module in MODULES]
 
-TOOL_HANDLERS = {module.SCHEMA["function"]["name"]: module.run for module in MODULES}
+TOOL_HANDLERS = {module.SCHEMA["name"]: module.run for module in MODULES}
 
 
 def execute_tool(name: str, args: dict) -> str:

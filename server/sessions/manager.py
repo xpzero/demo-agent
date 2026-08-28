@@ -8,7 +8,7 @@ DATA_DIR = Path(__file__).resolve().parents[1] / ".sessions"
 
 
 class SessionManager:
-    """多会话容器：负责隔离各会话的 messages，并把它们持久化到磁盘。"""
+    """多会话容器：负责隔离各会话的 Items，并把它们持久化到磁盘。"""
 
     def __init__(self, system_prompt: str):
         self._system_prompt = system_prompt
@@ -45,7 +45,7 @@ class SessionManager:
         """新建会话并立即切换过去。id 只增不复用，避免指代混乱"""
         session = Session(
             id=self._next_id,
-            messages=[{"role": "system", "content": self._system_prompt}],
+            items=[{"role": "system", "content": self._system_prompt}],
         )
         self._sessions[session.id] = session
         self._current_id = session.id
@@ -75,7 +75,7 @@ class SessionManager:
     def save_current(self) -> None:
         """在一轮对话结束后调用。
 
-        此刻 messages 里的 tool_calls 与 tool 结果一定是配对完整的，
+        此刻 Items 里的 function_call 与 function_call_output 是配对完整的，
         落盘的文件因此永远合法；空会话不写，避免产生无内容的文件。
         """
         session = self.current

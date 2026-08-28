@@ -6,15 +6,15 @@ from .render import render_events
 
 def run_agent(user_input: str, max_turns: int = 10) -> None:
     """单次任务：跑完一个输入的工具循环就结束"""
-    messages = [
+    items = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_input},
     ]
-    render_events(messages, max_turns)
+    render_events(items, max_turns)
 
 
 def chat() -> None:
-    """多轮对话：各会话的 messages 相互隔离，每轮结束后持久化当前会话"""
+    """多轮对话：各会话的 Items 相互隔离，每轮结束后持久化当前会话"""
     manager = SessionManager(SYSTEM_PROMPT)
 
     print("Agent 已启动。/help 查看命令，quit 退出")
@@ -29,7 +29,7 @@ def chat() -> None:
         if handle_command(user_input, manager):
             continue
 
-        messages = manager.current.messages
-        messages.append({"role": "user", "content": user_input})
-        render_events(messages)
+        items = manager.current.items
+        items.append({"role": "user", "content": user_input})
+        render_events(items)
         manager.save_current()

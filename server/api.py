@@ -37,7 +37,7 @@ def list_sessions():
         {
             "id": session.id,
             "summary": session.summary,
-            "message_count": len(session.messages),
+            "message_count": len(session.items),
             "current": is_current,
         }
         for is_current, session in manager.listing()
@@ -55,11 +55,11 @@ def chat(session_id: int, body: ChatRequest):
     if not manager.switch(session_id):
         raise HTTPException(status_code=404, detail=f"没有 {session_id} 号会话")
 
-    messages = manager.current.messages
-    messages.append({"role": "user", "content": body.message})
+    items = manager.current.items
+    items.append({"role": "user", "content": body.message})
 
     def sse():
-        for event in stream_events(messages):
+        for event in stream_events(items):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         # 流走完时配对一定完整，此刻落盘（与 CLI 的时机一致）
         manager.save_current()

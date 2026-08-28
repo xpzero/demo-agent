@@ -18,7 +18,8 @@ type AgentEvent =
   | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
   | { type: "tool_result"; id: string; content: string }
   | { type: "done"; content: string }
-  | { type: "max_turns" };
+  | { type: "max_turns" }
+  | { type: "error"; message: string };
 
 /** 逐行解析 SSE：chunk 可能含多条或半条消息，按空行分帧 */
 async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator<AgentEvent> {
@@ -87,6 +88,12 @@ export const chatAdapter: ChatModelAdapter = {
         }
       } else if (event.type === "max_turns") {
         parts.push({ type: "text", text: "[达到最大轮次，停止]" });
+      } else if (event.type === "error") {
+        const errorText = `[请求失败] ${event.message}`;
+        currentText = currentText ? `${currentText}\n\n${errorText}` : errorText;
+        const withoutText = parts.filter(part => part.type !== "text");
+        parts.length = 0;
+        parts.push(...withoutText, { type: "text", text: currentText });
       }
 
       yield { content: [...parts] };

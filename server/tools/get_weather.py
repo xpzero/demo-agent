@@ -1,19 +1,18 @@
 SCHEMA = {
     "type": "function",
-    "function": {
-        "name": "get_weather",
-        "description": "查询指定城市今天的天气",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "city": {
-                    "type": "string",
-                    "description": "城市名，例如 北京",
-                },
+    "name": "get_weather",
+    "description": "查询指定城市今天的天气",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "city": {
+                "type": "string",
+                "description": "城市名，例如 北京",
             },
-            "required": ["city"],
         },
+        "required": ["city"],
     },
+    "strict": False,
 }
 
 

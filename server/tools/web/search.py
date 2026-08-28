@@ -2,20 +2,19 @@ from .client import MAX_RESULTS, client, truncate, wrap_untrusted
 
 SCHEMA = {
     "type": "function",
-    "function": {
-        "name": "web_search",
-        "description": "联网搜索，返回若干条结果的标题、链接与摘要。需要页面全文时再用 fetch_url",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "搜索关键词",
-                },
+    "name": "web_search",
+    "description": "联网搜索，返回若干条结果的标题、链接与摘要。需要页面全文时再用 fetch_url",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "搜索关键词",
             },
-            "required": ["query"],
         },
+        "required": ["query"],
     },
+    "strict": False,
 }
 
 

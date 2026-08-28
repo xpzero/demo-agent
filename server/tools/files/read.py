@@ -2,20 +2,19 @@ from .paths import resolve
 
 SCHEMA = {
     "type": "function",
-    "function": {
-        "name": "read_file",
-        "description": "读取项目内某个文件的全部内容",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "相对项目根目录的路径，例如 tools/files/read.py",
-                },
+    "name": "read_file",
+    "description": "读取项目内某个文件的全部内容",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "相对项目根目录的路径，例如 tools/files/read.py",
             },
-            "required": ["path"],
         },
+        "required": ["path"],
     },
+    "strict": False,
 }
 
 

@@ -36,7 +36,7 @@ def handle(user_input: str, manager: SessionManager) -> bool:
 def _print_listing(manager: SessionManager) -> None:
     for is_current, session in manager.listing():
         mark = "*" if is_current else " "
-        print(f"{mark} {session.id:>3}  {session.summary}  ({len(session.messages)} 条消息)")
+        print(f"{mark} {session.id:>3}  {session.summary}  ({len(session.items)} 个上下文项)")
 
 
 def _parse_id(args: list[str]) -> int | None:
