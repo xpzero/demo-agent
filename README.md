@@ -33,16 +33,22 @@ TAVILY_API_KEY=tvly-xxx        # 仅联网搜索工具需要
 
 `MODEL` 和 `SYSTEM_PROMPT` 留空或不设置时，会分别使用当前代码中的默认值。
 
-启动网页模式时，在两个终端分别运行：
+初始化完成后，在项目根目录启动网页模式：
 
 ```bash
-cd server
-uv run uvicorn api:app --reload --host 127.0.0.1 --port 8000
+make dev
+```
+
+这会同时启动后端 `http://127.0.0.1:8000` 与前端；按 `Ctrl+C` 会停止两个进程。
+
+如需分别调试，也可以在两个终端运行：
+
+```bash
+make dev-backend
 ```
 
 ```bash
-cd web
-pnpm dev
+make dev-frontend
 ```
 
 浏览器访问 Vite 输出的地址（默认 `http://localhost:5173`）。
