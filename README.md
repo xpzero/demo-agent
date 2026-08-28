@@ -26,8 +26,12 @@ make init
 ```
 OPENAI_API_KEY=sk-xxx
 OPENAI_BASE_URL=https://your-gateway  # 使用自定义网关时填写；官方 API 可留空
+MODEL=gpt-5.6-terra                   # 可按网关支持的模型替换
+SYSTEM_PROMPT=你是一个有用的助手，可以调用工具来帮助用户。
 TAVILY_API_KEY=tvly-xxx        # 仅联网搜索工具需要
 ```
+
+`MODEL` 和 `SYSTEM_PROMPT` 留空或不设置时，会分别使用当前代码中的默认值。
 
 启动网页模式时，在两个终端分别运行：
 
