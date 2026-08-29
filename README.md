@@ -516,7 +516,7 @@ CLI 的 `render_events` 直接打印每个文本增量；FastAPI 的 `/api/sessi
 
 Responses SDK 返回的 Item 是 Pydantic 对象，不能直接交给 `json.dumps`，落盘前要调用 `model_dump(exclude_none=True)`。加载后得到普通字典也没关系，Responses 的 `input` 同时接受这些 Item 参数。
 
-旧版会话文件用 `messages` 键，并以 assistant `tool_calls` / `role="tool"` 表示工具链。`Session.from_dict` 会在加载时把它们拆成 `function_call` / `function_call_output` Items；新版统一以 `items` 键保存。兼容逻辑只在存储边界，Agent loop 始终只处理 Responses Items。
+这次按破坏性迁移处理会话格式：`Session.from_dict` 与新写入的会话文件都只接受 `items` 键，不再读取旧版使用 `messages` 键的会话文件。升级前如需保留历史，需要另行转换或备份 `server/.sessions/`。
 
 ## 与 ReAct 的关系
 
@@ -601,7 +601,7 @@ demo-agent/
     └── src/adapter.ts       # 调后端、解析 SSE、映射成 assistant-ui parts
 ```
 
-文件工具的根目录限定在 `server/` 内——Agent 读写不到 `web/` 与仓库根。会话同样由本地 `SessionManager` 管理：每条会话保存一份 `items`，落盘键也是 `items`；读取旧版含 `messages` 键的 JSON 时会自动兼容。
+文件工具的根目录限定在 `server/` 内——Agent 读写不到 `web/` 与仓库根。会话同样由本地 `SessionManager` 管理：每条会话保存一份 `items`，落盘键也是 `items`。
 
 现有工具：
 
@@ -633,7 +633,6 @@ demo-agent/
 - **工具结果必须带原始 `call_id`**：`function_call_output` 没有正确关联调用时，下一次请求会直接失败
 - **不必手拼流式工具参数**：本项目等 `response.completed` 后读取完整 `response.output`；只有要实时展示参数生成过程时才消费 `response.function_call_arguments.delta`
 - **工具输出统一成字符串**：`eval()` 可能返回 `int`，而当前工具事件和持久化格式都按字符串处理，所以 `calculate` 的返回值要 `str()` 包一层
-- **旧会话格式需要兼容**：新版落盘使用 `items`；加载器仍接受旧 `messages` 键，避免升级后历史会话全部消失
 
 ## 已知问题
 

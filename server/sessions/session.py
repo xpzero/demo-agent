@@ -31,45 +31,6 @@ def _text(item) -> str:
     return ""
 
 
-def _migrate_chat_messages(messages: list) -> list:
-    """把旧 Chat Completions 历史转成 Responses 可接受的 Items。"""
-    items = []
-
-    for message in messages:
-        if not isinstance(message, dict):
-            items.append(message)
-            continue
-
-        role = message.get("role")
-        tool_calls = message.get("tool_calls") or []
-
-        if role == "assistant" and tool_calls:
-            if message.get("content"):
-                items.append({"role": "assistant", "content": message["content"]})
-            for call in tool_calls:
-                function = call.get("function") or {}
-                items.append(
-                    {
-                        "type": "function_call",
-                        "call_id": call.get("id", ""),
-                        "name": function.get("name", ""),
-                        "arguments": function.get("arguments", ""),
-                    }
-                )
-        elif role == "tool":
-            items.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": message.get("tool_call_id", ""),
-                    "output": str(message.get("content") or ""),
-                }
-            )
-        else:
-            items.append(message)
-
-    return items
-
-
 def _clip(text: str, limit: int) -> str:
     """压掉换行等空白再截断，否则多行内容会打乱单行排版"""
     single_line = " ".join(text.split())
@@ -117,8 +78,4 @@ class Session:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Session":
-        if "items" in data:
-            items = list(data["items"])
-        else:
-            items = _migrate_chat_messages(list(data.get("messages", [])))
-        return cls(id=int(data["id"]), items=items)
+        return cls(id=int(data["id"]), items=list(data["items"]))

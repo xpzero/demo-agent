@@ -28,8 +28,8 @@ class SessionManager:
             try:
                 session = Session.from_dict(json.loads(path.read_text(encoding="utf-8")))
             except Exception as e:
-                # 单个文件坏掉不该拖垮启动
-                print(f"[跳过损坏的会话文件 {path.name}：{e}]")
+                # 单个文件不受支持或无法解析时，不应拖垮启动。
+                print(f"[跳过无法加载的会话文件 {path.name}：{e}]")
                 continue
             self._sessions[session.id] = session
 
