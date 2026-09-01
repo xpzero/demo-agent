@@ -12,6 +12,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh;
   max-width: 760px;
   margin: 0 auto;
   padding: 16px;
@@ -55,8 +56,13 @@ body {
 }
 
 .message.assistant .bubble {
-  background: #fff;
-  border: 1px solid #e7e5e4;
+  width: 100%;
+  max-width: 92%;
+  padding: 8px 4px;
+}
+
+.bubble > p {
+  margin: 0;
 }
 
 .composer {
@@ -99,4 +105,24 @@ body {
 
 @keyframes pulse {
   50% { opacity: 0.35; }
+}
+
+@media (max-width: 640px) {
+  .thread {
+    padding: 10px;
+  }
+
+  .bubble {
+    max-width: 92%;
+  }
+
+  .message.assistant .bubble {
+    max-width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking {
+    animation: none;
+  }
 }
