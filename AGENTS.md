@@ -1,141 +1,186 @@
 # AGENTS.md
 
-本文件适用于整个仓库。用户的明确要求优先；如果以后在子目录增加更近的 `AGENTS.md` 或 `AGENTS.override.md`，以更近的规则为准。
+本文件适用于整个仓库。用户的明确要求优先；若子目录以后出现更近的 `AGENTS.md` 或 `AGENTS.override.md`，以更近的文件为准。
 
-## 项目定位
+## 项目定位与事实来源
 
-- 这是一个不依赖 Agent 框架、直接使用 OpenAI Python SDK 的教学型 Agent 项目。
-- 后端位于 `server/`，使用 Python 3.12、Responses API、FastAPI 和 Tavily。
-- 前端位于 `web/`，使用 React、TypeScript、Vite 和 assistant-ui。
-- 根目录的 `main.py` 与 `pyproject.toml` 是早期脚手架；实际后端入口和依赖以 `server/main.py`、`server/api.py`、`server/pyproject.toml` 为准。
-- README 按 V1-V8 记录项目演进。改变架构、命令、事件协议或已知限制时，同步更新 README。
+- 这是一个教学型 Agent 项目：不依赖 Agent 框架，直接使用 OpenAI Python SDK 的 Responses API。
+- 后端位于 `server/`，使用 Python 3.12、FastAPI、OpenAI SDK、Tavily 和 uv。
+- 前端位于 `web/`，使用 React、TypeScript、Vite、assistant-ui，以及当前工作树中的 Tailwind CSS / Radix 风格组件。
+- 实际后端入口是 `server/main.py`（CLI）和 `server/api.py`（HTTP/SSE）；实际依赖清单是 `server/pyproject.toml` 与 `server/uv.lock`。
+- 根目录的 `main.py`、`pyproject.toml` 和 `.python-version` 是早期空脚手架，不是后端运行环境。
+- 当前代码与依赖清单是实现事实来源。根 README 同时包含历史演进示例；不要把旧版本片段误当成当前实现。架构、命令、事件协议或已知限制改变时，同步更新相关 README。
 
-## 常用命令
+## 开始改动前
 
-在仓库根目录初始化和启动：
+- 先查看 `git status --short`，识别并保留用户已有改动。本仓库可能处于脏工作树；不要顺手格式化、删除或重写任务范围外的文件。
+- 不直接查看、打印、修改或提交 `server/.env` 的内容。应用通过 `load_dotenv()` 正常加载配置不受此限；配置文档只引用 `server/.env.example` 和占位值。
+- `server/.sessions/` 含完整对话、工具结果和 encrypted reasoning，属于敏感运行时数据；除非任务明确要求，不读取、不改写、不提交。
+- 不编辑或提交 `.venv/`、`node_modules/`、`web/dist/`、`__pycache__/`、缓存或其他生成物。
+- 除非用户明确要求，不创建提交、不切换或新建分支、不推送远端。
+
+## 初始化、运行与检查
+
+初始化仅在需要安装依赖或首次配置时从仓库根执行：
 
 ```bash
 make init
+```
+
+`make init` 会在缺少时创建 `server/.env`，并分别执行锁定安装；它不是日常验证命令，不能覆盖已有 `.env`。
+
+从仓库根启动：
+
+```bash
 make dev
 make dev-backend
 make dev-frontend
 ```
 
-命令行 Agent：
+运行 CLI：
 
 ```bash
 cd server
 uv run main.py
 ```
 
-后端检查：
+后端检查必须从 `server/` 执行：
 
 ```bash
-cd server
 uv run python -m unittest discover -s tests -v
 uv lock --check
 ```
 
-前端检查：
+前端检查必须从 `web/` 执行：
 
 ```bash
-cd web
 pnpm lint
 pnpm build
 ```
 
-不要为了运行命令改用根目录的空依赖环境。后端命令始终从 `server/` 执行，前端命令始终从 `web/` 执行。
+Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运行后端命令改用根目录的空 Python 环境，也不要在仓库根直接运行前端脚本。
 
-## Responses API 不变量
+## 架构边界
 
-- 生产代码使用 `client.responses.create(...)`；不要重新引入 Chat Completions 的 message/tool-call 协议。
-- `server/agent/loop.py::stream_events` 是唯一的 Agent 内核。它只产出结构化事件，不打印、不依赖 CLI 或网页。
-- 保留三种不同层次的循环：会话输入循环、一次用户任务内的工具调用循环、单次请求的流事件读取循环。不要因 Responses API 支持工具而删除本地自定义函数的执行循环。
-- 使用流时，转发 `response.output_text.delta`；以 `response.completed.response` 作为完整结果的事实来源。
-- 不要手工拼接 `response.function_call_arguments.delta`。当前产品不实时展示生成中的工具参数，应在 `response.completed` 后读取完整的 `function_call.arguments`。
-- 每轮都要把完整的 `response.output` 追加到上下文，不能只保存 `output_text` 或只挑 `function_call`；其中可能包含 message、reasoning 和其他 Item。
-- 每个本地工具结果使用 `function_call_output` 回填，并原样复用对应调用的 `call_id`。一次响应里的所有并行调用都必须执行和回填。
-- 当前会话策略是本地保存完整 Items：请求使用 `store=False`，并包含 `reasoning.encrypted_content`。若改成 `previous_response_id` 或 Conversations API，必须同时调整持久化、隐私语义、测试与 README。
-- `items` 会被 `stream_events` 原地追加；调用方依赖这一行为保存会话历史。
+- `server/agent/`：OpenAI 客户端配置与唯一 Agent 内核。
+- `server/tools/`：工具 schema、实现、注册和执行分发。
+- `server/sessions/`：Items 会话模型、本地持久化和 CLI 会话命令。
+- `server/cli/`：终端输入循环与事件呈现。
+- `server/api.py`：FastAPI 路由、CORS 和项目事件到 SSE 的传输映射。
+- `web/src/adapter.ts`：HTTP 请求、SSE 分帧及项目事件到 assistant-ui message parts 的映射。
+- `web/src/App.tsx` 与 `web/src/ToolCallPart.tsx`：消息和工具调用的 UI 组合；`web/src/preview.ts` 只提供开发预览夹具。
 
-## 项目事件与 SSE
+保持模型传输、Agent 编排、工具实现、会话存储和 CLI/网页呈现分离。不要在 `stream_events` 中打印、读终端输入、生成 SSE 帧或依赖 React 语义。
 
-后端向消费者暴露的稳定事件为：
+## Responses API 与 Agent loop 不变量
 
-- `text_delta`
-- `tool_call`
-- `tool_result`
-- `done`
+- 生产代码使用 `client.responses.create(...)`；不要重新引入 Chat Completions 的 `messages` / assistant `tool_calls` / `role="tool"` 协议。
+- `server/agent/loop.py::stream_events(items, services, max_turns, on_approval, session_id)` 是唯一 Agent 内核。它产出结构化项目事件，并原地追加 `items`；CLI、API 和会话保存依赖这一行为。
+- 每次模型请求保留 `stream=True`、`store=False` 和 `include=["reasoning.encrypted_content"]`。若改成 `previous_response_id`、Conversations API 或服务端存储，必须同时重新设计持久化、隐私语义、测试和 README。
+- `reasoning.encrypted_content` 是供后续请求续传的不透明数据，必须随完整 Items 原样保留和持久化。不要尝试解析、单独写入日志或向用户展示，也不要把它包装成用户可见的“思考过程”。当前项目没有 reasoning 事件。
+- 流中只把 `response.output_text.delta` 映射为文本增量；以 `response.completed.response` 作为完整 Response 的事实来源。显式处理 `response.failed`、`response.incomplete`、流内 `error` 和“流结束但没有 completed”。
+- 不手工拼接 `response.function_call_arguments.delta`。当前产品不展示参数生成过程，应在 completed 后读取完整 `function_call.arguments`。
+- 在改变历史前先解析完同一响应内所有调用参数。非法 JSON 属于编排错误，应成为 `error` 事件，不能留下只有 call、没有 output 的半截历史。
+- 每轮把完整 `response.output` 追加到上下文，不能只保留 `output_text`、message 或 function call；其中可能同时包含 message、reasoning 和其他 Item。
+- 同一 `response.output` 可以包含多个 sibling function calls。当前实现按响应顺序检查全部调用，并按原顺序提交结果；`allow` 会在准备批次时执行，`ask` 则在用户逐个批准时执行，因此副作用的实际发生顺序不一定等于模型调用顺序。若任务要求严格顺序，必须重新设计执行阶段，不能把结果顺序误当成执行顺序。
+- 每个工具结果使用 `function_call_output`，并原样复用对应调用的 `call_id`。不得用 Item `id` 代替 `call_id`，不得漏掉或重复回填。
+- 工具处理器自身的异常由 `execute_tool` 转成字符串结果，让模型可以修正重试；请求错误、流错误、参数 JSON 错误等编排异常由 `stream_events` 转成 `error` 事件。不要混淆两条失败路径。
+- `max_turns` 限制一次用户任务内的模型请求次数。达到上限产出 `max_turns`，不能让工具循环无限运行。
+
+## 项目事件、SSE 与前端映射
+
+稳定项目事件及字段为：
+
+- `text_delta`：`text`
+- `tool_call`：`id`、`name`、`args`
+- `tool_result`：`id`、`content`，拒绝或审批恢复结果还带 `outcome`
+- `approval_required`：`call_ids`
+- `done`：`content`
 - `max_turns`
-- `error`
+- `error`：`message`
 
-修改事件名称或字段时，必须同步检查：
+修改名称、字段、顺序或终止语义时，至少同步检查：
 
 - `server/agent/loop.py`
 - `server/cli/render.py`
 - `server/api.py`
-- `web/src/adapter.ts`
 - `server/tests/test_agent_loop.py`
+- `web/src/adapter.ts`
+- `web/src/App.tsx`、`web/src/ToolCallPart.tsx` 和相关 preview fixtures（若 message part 语义变化）
+- 根 README 的事件与架构说明
 
-OpenAI 到后端是一层 Responses typed event 流；后端到浏览器是项目自己的 SSE。HTTP 接口使用带 JSON body 的 POST，因此前端通过 `fetch` 和 `ReadableStream` 解析 SSE，而不是 `EventSource`。
+OpenAI 到后端是 Responses typed event 流；后端到消费者是项目自己的事件协议。不要把 OpenAI 原始事件直接暴露给 CLI 或浏览器。
 
-- 后端 SSE 帧保持 `data: <json>\n\n` 格式和 `text/event-stream` 媒体类型。
-- `readSse` 的 `buffer` 用于还原可能被网络切开的 SSE 帧。
-- assistant-ui 要求每次 yield 当前完整内容，因此前端的 `currentText += event.text` 必须保留；这与后端不拼接最终文本并不矛盾。
-- 不要把 OpenAI 原始事件直接暴露给前端；先映射成项目事件，保持 UI 与供应商协议解耦。
+- 聊天接口是带 JSON body 的 POST SSE，前端必须使用 `fetch` + `ReadableStream`，不能改用不支持该请求形状的 `EventSource`。
+- 后端 SSE 帧保持 `data: <json>\n\n` 和 `text/event-stream`。前端 `readSse` 的 `buffer` 用于还原网络拆开的半帧或合并的多帧，不能按单个 chunk 直接 `JSON.parse`。
+- assistant-ui 每次 yield 需要“截至当前的完整 content 快照”，不是单个 delta。必须保留 `currentText += event.text` 和复制后的完整 parts。
+- 保持原始 part 顺序：文本增量只累加到当前 text part；遇到 `tool_call` 后结束当前文本段并插入 tool-call part；后续文本创建新 text part；`tool_result` 按同一 `id` 更新对应 tool-call。不要把工具前后的文本过滤、合并或统一挪到末尾。
+- `done.content` 是完整最终文本的事实来源，但当前消费者用 streamed text 呈现；若开始消费它，避免重复显示已经收到的 deltas。
+- 流式 `error` 要先形成用户可见状态，再终止 adapter 的运行状态。不要只抛异常而丢失后端错误信息。
+- `tool_call` 在等待审批时额外带 `approval_required: true`，`write_file` 还带结构化 `preview`。浏览器只通过项目事件接入审批，不直接消费 OpenAI 原始事件。
 
-## 工具约定
+## 工具约定与安全边界
 
-- 每个工具模块导出扁平 Responses function schema `SCHEMA` 和实现 `run(args)`。
-- schema 的 `type`、`name`、`description`、`parameters`、`strict` 位于同一层；不要套回 Chat Completions 的 `function` 外壳。
-- 在所属子包的 `MODULES` 中登记新工具。根工具集合从模块生成 `TOOLS` 与 `TOOL_HANDLERS`，不要另写一份名称映射。
-- 工具返回值最终必须是字符串。工具异常由 `execute_tool` 转成文本结果，让模型有机会修正重试。
-- 模型生成的参数和工具返回的外部内容都不可信。增加工具时要验证字段、限制副作用，并为失败路径补测试。
+当前工具是 `calculate`、`get_weather`、`read_file`、`write_file`、`web_search` 和 `fetch_url`。新增或修改工具时：
 
-## 安全边界
+- 每个工具模块导出扁平 Responses function schema `SCHEMA` 和 `run(args)`。`type`、`name`、`description`、`parameters`、`strict` 位于同一层，不套 Chat Completions 的 `function` 外壳。
+- 每个工具模块还要导出 `permission_requests(args)`，用 `PermissionRequest` 描述本次具体操作；权限信息不能混入发给 Responses API 的 `SCHEMA`。需要预览的工具可以额外导出 `preview(args)`。
+- 在所属子包的 `MODULES` 中登记工具；根 `server/tools/__init__.py` 从模块生成 Schema、处理器和权限请求构造器，不要再维护一份手写名称映射。
+- 默认权限规则来自 `server/permission.json`。配置必须在启动时严格加载；无效 JSON、规则结构或 action 必须导致启动失败，不能静默降级为 `allow`。
+- 工具最终返回字符串。对模型生成的参数验证类型、必填字段、长度、允许值和副作用边界；JSON 能解码不代表它一定是对象或安全输入。
+- 为成功和失败路径补测试，尤其是路径、外部 URL、覆盖写入及部分执行失败。不要使用真实密钥或真实网络作为单元测试前提。
 
-- 永远不要读取、打印、修改或提交 `server/.env` 中的真实密钥。需要配置说明时只使用 `.env.example` 和占位值。
-- 不提交 `server/.sessions/`；其中包含完整对话、工具输出和 encrypted reasoning。
-- 文件工具只能访问 `server/` 范围。必须保留规范化后的越界检查以及对 `.env`、`.git` 的屏蔽；不要接受未经校验的绝对路径或 `..` 绕过。
-- `web_search` 和 `fetch_url` 的结果属于不可信互联网内容。保留长度截断、边界标记和提示注入警告；不要把网页中的指令当作应用指令执行。
-- `write_file` 会覆盖文件。扩大其作用域、自动调用条件或权限前，必须明确评估数据损失与 prompt injection 风险。
-- 实际 API smoke test 应使用无副作用请求；不要通过 smoke test 触发 `write_file` 或其他破坏性工具。
+已知高风险边界：
 
-## 会话格式
+- `calculate` 直接对模型输入使用 `eval()`，等同任意 Python 代码执行，仅是教学遗留，因此当前权限结果必须保持 `ask`。不要把它描述为安全计算器、部署到不可信用户环境或扩大其暴露面；安全化时改用受限表达式解析并补恶意输入测试。
+- 文件工具的根目录是 `server/`，不是仓库根。必须保留真实路径规范化、越界和符号链接逃逸检查。
+- 现有路径黑名单阻止首段为 `.env`、`.git` 或 `.sessions` 的路径，但仍不等于全面的敏感文件策略。不要在文档中夸大现有保护；触碰文件工具安全时应覆盖绝对路径、`..`、符号链接、敏感目录和覆盖行为测试。
+- `write_file` 会创建父目录并直接覆盖现有文件，当前通过 Diff、内容摘要复核和单次确认阻止自动执行或过期审批，但仍没有备份或跨进程事务。扩大作用域、自动调用条件或权限前，必须评估数据损失与 prompt injection 风险。
+- `web_search` 和 `fetch_url` 的结果是外部不可信内容。保留数量/长度限制、边界标记和提示注入警告；这些标记只是缓解，不是安全隔离。
+- 若更改 URL 抓取方式，显式验证 scheme、重定向和内网/本机地址，评估 SSRF；不要把网页中的指令当作应用指令执行。
+- 真实 API smoke test 只能使用无副作用请求，不能触发 `write_file`、危险表达式或其他破坏性工具。
 
-- 新会话统一使用 `Session.items`，落盘键为 `items`。
-- 加载器与落盘格式只接受 `items`。这次采用破坏性迁移，不要重新引入旧版 `messages`、assistant `tool_calls` 或 `role="tool"` 兼容逻辑。
-- SDK 返回的 Pydantic Items 落盘前使用 `model_dump(exclude_none=True)`；加载后的普通字典必须仍可作为 Responses input 重放。
-- 保持 function call 与 output 成对后再保存会话，避免生成无法继续的历史。
-- 当前 FastAPI `SessionManager.current` 是进程级共享指针，只支持单进程、顺序使用。涉及并发时先修正会话所有权，不要仅增加 worker 数量。
+## 会话格式、保存时机与并发
 
-## 编码与改动原则
+- `Session` 保存 `id`、`items`，审批暂停时还保存 `pending_approval`；新会话以 system message Item 开始。
+- 加载器只接受 Items 格式。不要恢复旧 `messages`、assistant `tool_calls` 或 `role="tool"` 兼容层，除非任务明确要求一次新的迁移设计。
+- SDK 返回的 Pydantic Items 落盘前使用 `model_dump(exclude_none=True)`；从 JSON 加载的普通字典必须仍可作为 Responses input 重放。
+- 正常完成时保存配对完整的 function call 与 output；等待审批时允许暂存未配对调用，但 `pending_approval` 必须完整记录同轮所有调用。任何修改都必须考虑错误和客户端取消路径。
+- `server/api.py` 按明确的 `session_id` 获取和保存会话，并用进程内锁阻止同会话重复运行；`SessionManager.current` 仍服务 CLI 和列表显示，不得重新用于 HTTP 流结束时选取保存目标。
+- 进程内锁不解决多 worker、CLI 与 API 同时运行或多个进程写同一 JSON 的竞争。不要把当前实现描述为跨进程并发安全。
+- CLI 与 API 同时运行也会无锁共享 `server/.sessions/`，可能发生 ID 或文件覆盖冲突；不要将这种组合描述为受支持。
+- API/Session 测试必须把数据目录重定向到临时目录，绝不能读取或改写真实 `server/.sessions/`。
 
-- 延续现有简洁、显式的实现，不额外引入 Agent 框架或生产依赖，除非任务明确需要。
-- 用户可见文本和现有说明主要使用中文；新增提示、错误和文档保持语言一致。
-- 后端保持传输、Agent 编排、工具实现、会话存储和呈现层分离。
-- 修改依赖时同时更新对应清单和锁文件：后端是 `server/pyproject.toml` 与 `server/uv.lock`，前端是 `web/package.json` 与 `web/pnpm-lock.yaml`。
-- 不编辑或提交 `.venv/`、`node_modules/`、`web/dist/`、缓存文件或运行时会话。
-- 保留工作区中与任务无关的用户改动。除非用户明确要求，不创建提交、不推送远端。
+## 编码、依赖与文档
 
-## 验证要求
+- 延续现有简洁、显式的实现；除非任务明确需要，不引入 Agent 框架或新的生产依赖。
+- 用户可见文本和主要说明使用中文；新增提示、错误和文档保持一致。
+- 后端依赖变化同时更新 `server/pyproject.toml` 和 `server/uv.lock`；前端依赖变化同时更新 `web/package.json` 和 `web/pnpm-lock.yaml`。
+- 前端的 `@/*` alias 必须在 TypeScript 与 Vite 配置中保持一致。修改 assistant-ui message part 或工具 UI 时，以已安装版本的类型为准，不凭旧示例猜 API。
+- 当前浏览器把一条后端会话 ID 保存在 `localStorage`，可以在刷新后恢复待审批卡或继续已完成决定的审批批次；它仍没有会话列表、切换 UI 或完整聊天历史恢复。不要仅因后端有这些 API 就把它们描述成前端现有能力。
+- README 的历史教学价值需要保留。重构时更新“当前结构”和“已知问题”，不要无意删掉用于解释 V1-V8 演进的旧版示例。
 
+## 验证矩阵
+
+- 只改文档：检查路径、命令、字段和当前代码一致；无需把未运行的测试写成已通过。
 - 修改 Agent loop、工具协议或会话格式：运行完整后端 unittest。
-- 修改 SSE 或项目事件：运行后端 unittest，并运行前端 `pnpm lint` 与 `pnpm build`。
-- 修改前端：至少运行 `pnpm lint` 和 `pnpm build`。
-- 修改 Python 依赖或锁文件：运行 `uv lock --check`，必要时再运行完整后端测试。
-- 测试不得依赖真实 OpenAI/Tavily 网络请求；用 mock 构造 typed events、完整 Response、并行 function calls 和错误事件。
-- 至少覆盖成功文本、并行工具调用、最大轮次、无 completed、失败/不完整事件、无效 JSON 参数和 Items JSON 往返。
-- 如果受凭证或网络限制无法完成真实 smoke test，明确报告未验证的边界；不要把 mock 测试描述成真实网关验证。
+- 修改 API、SSE、项目事件或保存时机：运行完整后端 unittest，并运行前端 `pnpm lint` 与 `pnpm build`；同时补充中断、错误、事件顺序和保存目标测试。
+- 修改前端：至少运行 `pnpm lint` 与 `pnpm build`。仓库当前没有前端测试脚本；涉及文本—工具—文本映射时必须人工或新增测试验证 part 不丢失、不合并、不重排。
+- 修改 Python 依赖或锁文件：运行 `uv lock --check` 和受影响的后端测试。
+- 修改前端依赖或锁文件：使用锁定安装语义，并运行 `pnpm lint` 与 `pnpm build`。
+- 测试不得依赖真实 OpenAI/Tavily 请求。使用 mock 构造 typed events、完整 Response、同轮多个 function calls 和错误事件。
+- 相关后端测试应覆盖成功文本、完整 output 保留、同轮全部调用、原始 call_id、最大轮次、无 completed、failed/incomplete/error、无效 JSON 参数和 Items JSON 往返。
+- 凭证或网络受限时，明确报告未验证的真实网关边界；不要把 mock 单元测试称为真实 API smoke test。
 
-## Code Review Rules
+## Code Review 优先级
 
-审查时优先标记以下问题：
+审查时优先标记：
 
-- 丢弃 `response.output` 中的 reasoning/message Items，导致后续请求上下文不完整。
-- `function_call_output.call_id` 与原调用不匹配，或并行调用只处理了一部分。
-- 重新引入流式工具参数手工拼接，或把文本 delta 当成完整文本。
-- 后端、CLI、SSE 与前端事件联合类型不同步。
-- 会话在工具调用和工具结果尚未配对时落盘。
-- 文件路径逃逸、密钥泄漏、未标记的外部内容或扩大写文件权限。
-- 在共享 `SessionManager.current` 未修复前引入并发 worker 或并行聊天。
+- 任意代码执行、无确认覆盖写入、敏感文件访问或工具权限扩张。
+- 丢弃 `response.output` 中的 reasoning/message Items，或解析失败后遗留半截 function call。
+- `function_call_output.call_id` 不匹配、漏处理同轮调用，或改变有副作用工具的执行顺序。
+- 把文本 delta 当完整文本、重新手拼工具参数 delta，或让 CLI/SSE/前端事件联合类型漂移。
+- 前端把工具前后的多段文本合并、过滤或重排，或 tool result 更新到错误的调用。
+- 错误、取消或最大轮次路径导致内存/落盘会话中的 call 与 output 不配对。
+- 依赖全局 `SessionManager.current` 的交错保存、并发 worker 或并行 chat。
+- 路径逃逸、真实密钥/会话泄漏、未标记的外部内容、SSRF 或把提示注入内容当指令执行。

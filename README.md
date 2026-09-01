@@ -395,11 +395,11 @@ Agent: 已在 `notes/hello.md` 中写入项目介绍。
 Agent: 导出了 SCHEMA（描述 calculate 工具及其 expression 参数）和 run(args)……
 ```
 
-`write_file` 会自动创建缺失的父目录，文件已存在则**直接覆盖**，没有确认环节。
+这个版本中的 `write_file` 会自动创建缺失的父目录，文件已存在则**直接覆盖**，还没有确认环节；当前实现已经在 V9 加入执行前审批。
 
 #### 新增一个工具
 
-1. 在对应子包下建文件（如 `tools/web/xxx.py`），导出 `SCHEMA` 和 `run(args)`
+1. 在对应子包下建文件（如 `tools/web/xxx.py`），导出 `SCHEMA`、`permission_requests(args)` 和 `run(args)`
 2. 在该子包的 `__init__.py` 的 `MODULES` 里加上这个模块
 
 没有第三步——根 `__init__.py` 会聚合各子包，`TOOLS` 和 `TOOL_HANDLERS` 都是自动派生的。
@@ -500,6 +500,7 @@ def wrap_untrusted(text: str) -> str:
 | `text_delta` | 一段新增文本 |
 | `tool_call` | 模型发起一次本地工具调用 |
 | `tool_result` | 本地工具执行完毕 |
+| `approval_required` | 高风险工具已持久化，等待用户决定后结束本次流 |
 | `done` | 模型给出最终回复 |
 | `max_turns` | 用完本轮模型请求上限 |
 | `error` | 请求、流处理或参数解析失败 |
@@ -512,11 +513,48 @@ CLI 的 `render_events` 直接打印每个文本增量；FastAPI 的 `/api/sessi
 
 目标：不同话题互不污染，进程重启后还能继续上次对话。
 
-每条 `Session` 保存 `id` 与 `items`；`SessionManager` 负责新建、切换、删除，以及在一轮事件流结束后写入 `.sessions/<id>.json`。新会话从一条 system message Item 开始，用户输入、完整 `response.output` 与本地 `function_call_output` 随对话依次追加。
+每条 `Session` 保存 `id` 与 `items`，等待人工确认时还会保存 `pending_approval`；`SessionManager` 负责新建、切换、删除和写入 `.sessions/<id>.json`。新会话从一条 system message Item 开始，用户输入、完整 `response.output` 与本地 `function_call_output` 随对话依次追加。
 
 Responses SDK 返回的 Item 是 Pydantic 对象，不能直接交给 `json.dumps`，落盘前要调用 `model_dump(exclude_none=True)`。加载后得到普通字典也没关系，Responses 的 `input` 同时接受这些 Item 参数。
 
 这次按破坏性迁移处理会话格式：`Session.from_dict` 与新写入的会话文件都只接受 `items` 键，不再读取旧版使用 `messages` 键的会话文件。升级前如需保留历史，需要另行转换或备份 `server/.sessions/`。
+
+### V9 · 工具审批与文件 Diff
+
+目标：模型可以提出有副作用的动作，但是否执行由 Agent 外层的运行支架决定。
+
+V9 最初由工具模块通过内部 `POLICY` 声明 `auto` 或 `confirm`，这个字段不会进入发给 Responses API 的工具 Schema。`write_file` 和仍使用 `eval()` 的 `calculate` 需要确认；其他工具自动执行。`write_file` 在等待确认前只读取旧内容并生成 Diff，不修改文件。当前实现已在下一步把这层静态分类替换成可注入权限服务。
+
+审批不会让 SSE 和 Python generator 一直悬挂。模型返回 `function_call` 后，后端先保存完整 `response.output` 和 `pending_approval`，再发送 `approval_required` 并结束本次流。批准接口会核对预览时的规范路径与内容摘要后执行工具；用户批准或拒绝后，`/resume` 为每个调用追加匹配原 `call_id` 的 `function_call_output`，然后使用本地保存的完整 Items 发起新的 Responses 请求。
+
+```text
+function_call
+    ↓
+保存 pending_approval + 展示 Diff
+    ├── 批准 → 执行工具 → function_call_output
+    └── 拒绝 → 不执行   → function_call_output
+                              ↓
+                        新的 Responses 请求
+```
+
+### V10 · 可注入权限服务
+
+目标：工具只描述准备执行的操作，由 Agent loop 注入的 `PermissionService` 统一返回 `allow`、`ask` 或 `deny`。
+
+`read_file` 会生成 `read + 规范化路径`，`write_file` 会生成 `write + 规范化路径`；其他工具使用自己的工具名作为权限名。默认的 `RulePermissionService` 从 `server/permission.json` 加载有序通配符规则并采用“最后匹配优先”：读取和普通查询自动执行，写文件与 `calculate` 等待确认，专用演示路径 `notes/permission-deny-demo.txt` 被拒绝，没有匹配规则时也等待确认。配置损坏或 action 不是 `allow`、`ask`、`deny` 时，应用会在启动时失败，而不是放宽权限。
+
+```text
+模型 function_call
+    ↓
+工具生成 PermissionRequest
+    ↓
+注入的 PermissionService
+    ├── allow → 立即执行
+    ├── ask   → 进入现有审批批次
+    └── deny  → 不执行，但仍生成匹配 call_id 的结果
+```
+
+规则引擎只是默认实现；`stream_events` 依赖的是 `PermissionService` 接口和 `ServiceContainer`，测试或后续实现可以注入另一套权限服务，而不修改 Agent loop。审批仍负责暂停、持久化与恢复，不负责决定规则。
 
 ## 与 ReAct 的关系
 
@@ -581,6 +619,7 @@ demo-agent/
 │   ├── main.py              # CLI 入口
 │   ├── api.py               # FastAPI、会话接口与 SSE 输出
 │   ├── agent/               # 模型交互
+│   │   ├── approval.py      # 审批批次、决定与工具结果提交
 │   │   ├── client.py        # OpenAI 客户端、MODEL、SYSTEM_PROMPT
 │   │   └── loop.py          # Responses 流式 agent loop，产出项目内事件
 │   ├── cli/                 # 终端交互与事件渲染
@@ -590,6 +629,10 @@ demo-agent/
 │   │   ├── session.py       # 会话容器
 │   │   ├── manager.py       # 加载、新建、切换、删除、保存
 │   │   └── commands.py      # /new /list /switch /del
+│   ├── services/            # 可注入服务及默认实现
+│   │   ├── container.py     # Agent 使用的显式依赖容器
+│   │   └── permission/      # 权限接口、配置加载与规则引擎
+│   ├── permission.json      # 默认工具权限规则
 │   ├── tools/               # 工具集合，一个工具一个文件，按领域分子包
 │   │   ├── calculate.py
 │   │   ├── get_weather.py
@@ -601,30 +644,30 @@ demo-agent/
     └── src/adapter.ts       # 调后端、解析 SSE、映射成 assistant-ui parts
 ```
 
-文件工具的根目录限定在 `server/` 内——Agent 读写不到 `web/` 与仓库根。会话同样由本地 `SessionManager` 管理：每条会话保存一份 `items`，落盘键也是 `items`。
+文件工具的根目录限定在 `server/` 内——Agent 读写不到 `web/` 与仓库根，`.env`、`.git` 与 `.sessions` 也禁止访问。会话同样由本地 `SessionManager` 管理：每条会话保存 `items`，审批暂停时额外保存 `pending_approval`。
 
 现有工具：
 
-| 工具 | 作用 |
-|---|---|
-| `calculate` | 计算数学表达式 |
-| `get_weather` | 查天气（写死的假数据） |
-| `read_file` | 读 server 目录内文件 |
-| `write_file` | 写 server 目录内文件，自动建父目录，已存在则覆盖 |
-| `web_search` | 联网搜索，返回标题、链接、摘要 |
-| `fetch_url` | 抓取网页正文 |
+| 工具 | 作用 | 默认权限结果 |
+|---|---|---|
+| `calculate` | 计算数学表达式 | `ask` |
+| `get_weather` | 查天气（写死的假数据） | `allow` |
+| `read_file` | 读 server 目录内文件 | `allow` |
+| `write_file` | 写 server 目录内文件，自动建父目录，已存在则覆盖 | `ask` |
+| `web_search` | 联网搜索，返回标题、链接、摘要 | `allow` |
+| `fetch_url` | 抓取网页正文 | `allow` |
 
 关键函数的分工：
 
 | 函数 | 职责 |
 |---|---|
-| `stream_events(items, max_turns)` | 请求 Responses API、处理 typed events、执行工具并产出项目内事件 |
+| `stream_events(items, services, max_turns, on_approval)` | 请求 Responses API，通过注入服务裁决工具调用并持久化审批点 |
 | `execute_tool(name, args)` | 按名称执行一个本地工具，把工具异常转成可回灌的文本结果 |
-| `render_events(items, max_turns)` | 消费同一事件流并渲染到终端 |
-| `run_agent(user_input)` | 单次任务，跑完就结束 |
-| `chat()` | 多轮交互式对话，接入 `sessions/` 的多会话管理 |
+| `render_events(items, services, max_turns)` | 消费同一事件流并渲染到终端 |
+| `run_agent(user_input, services)` | 单次任务，跑完就结束 |
+| `chat(services)` | 多轮交互式对话，接入 `sessions/` 的多会话管理 |
 
-`stream_events` 是唯一的 Agent 内核。它把 OpenAI 的 `response.output_text.delta` 等事件翻译成项目自己的 `text_delta`、`tool_call`、`tool_result`、`done`、`max_turns` 与 `error`；CLI 和 HTTP 只是两种消费者。这样前端不用理解 OpenAI 的完整事件协议，后端内部也不掺杂打印或页面逻辑。
+`stream_events` 是唯一的 Agent 内核。它把 OpenAI 的 `response.output_text.delta` 等事件翻译成项目自己的 `text_delta`、`tool_call`、`tool_result`、`approval_required`、`done`、`max_turns` 与 `error`；CLI 和 HTTP 只是两种消费者。这样前端不用理解 OpenAI 的完整事件协议，后端内部也不掺杂打印或页面逻辑。
 
 ## 踩过的坑
 
@@ -637,11 +680,11 @@ demo-agent/
 ## 已知问题
 
 - `tools/calculate.py` 用 `eval()` 执行模型给的表达式，等于任意代码执行，仅适用于本地学习，不能上线
-- **prompt injection 未真正防住**：`web_search` / `fetch_url` 引入的外部内容可能夹带指令，而 Agent 同时具备 `write_file`。现有的不可信标注只能降低概率，缺少权限隔离与人工确认
-- `write_file` 直接覆盖已有文件，没有确认或备份环节，改坏了只能靠 git 找回
+- **prompt injection 未真正防住**：`web_search` / `fetch_url` 引入的外部内容可能夹带指令。`write_file` 的单次人工确认降低了误写风险，但还没有“读取外部内容后禁止写入”等权限隔离
+- `write_file` 获批后仍会直接覆盖文件，没有备份或事务，批准前必须检查完整 Diff
 - 没有上下文长度控制，多轮对话久了会超出 token 上限
 - 没有应用层重试策略；模型请求或流处理异常会转成 `error` 事件，但中断的任务不会自动续跑
-- HTTP 服务里的 `SessionManager.current` 是共享指针，当前只适合单进程、顺序请求，不支持并发聊天
+- HTTP 聊天和审批已按 `session_id` 取值、保存，并用进程内锁阻止同会话重复运行；多 worker、CLI 与 API 同时写 JSON 等跨进程并发仍不受支持
 
 ## 后续计划
 
@@ -651,7 +694,7 @@ demo-agent/
 
 ### 2. 并发与持久化
 
-- 把进程级 `current` 指针改成请求显式携带的 `session_id`，避免两个流式请求互相切换会话
+- 把当前进程内运行保护扩展成完整的会话所有权与并发模型，并处理多 worker / 多进程竞争
 - 会话量上来后从 JSON 文件迁到 SQLite 等带并发控制的存储
 - 为流中断设计事务边界，避免把尚未完成的调用链落成半截上下文
 
