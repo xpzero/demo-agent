@@ -1,3 +1,6 @@
+from services.permission import PermissionRequest
+
+
 SCHEMA = {
     "type": "function",
     "name": "calculate",
@@ -14,6 +17,10 @@ SCHEMA = {
     },
     "strict": False,
 }
+
+
+def permission_requests(args: dict) -> tuple[PermissionRequest, ...]:
+    return (PermissionRequest("calculate", str(args.get("expression", "*"))),)
 
 
 def run(args: dict) -> str:

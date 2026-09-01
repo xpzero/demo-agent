@@ -1,0 +1,14 @@
+{
+  "*": "ask",
+  "read": {
+    "*": "allow"
+  },
+  "write": {
+    "*": "ask",
+    "notes/permission-deny-demo.txt": "deny"
+  },
+  "calculate": "ask",
+  "get_weather": "allow",
+  "web_search": "allow",
+  "fetch_url": "allow"
+}

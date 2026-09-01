@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 # 禁止访问的路径：.env 含 API key，读出来会被带进模型上下文；.git 是仓库元数据
-BLOCKED = {".env", ".git"}
+BLOCKED = {".env", ".git", ".sessions"}
 
 
 def resolve(path: str) -> Path:

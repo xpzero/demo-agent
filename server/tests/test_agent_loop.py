@@ -8,7 +8,9 @@ from unittest.mock import Mock, call, patch
 # network request, but the SDK still requires a syntactically present key.
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
-from agent import loop  # noqa: E402
+from agent import approval, loop  # noqa: E402
+from services import ServiceContainer  # noqa: E402
+from services.permission import PermissionDecision  # noqa: E402
 
 
 def item(item_type: str, **fields):
@@ -44,17 +46,51 @@ class RecordingResponses:
         return next(self._streams)
 
 
+class FakePermissionService:
+    def __init__(self, actions=None):
+        self.actions = actions or {}
+        self.checks = []
+
+    def check(self, requests, context):
+        self.checks.append((requests, context))
+        return PermissionDecision(self.actions.get(context.tool_name, "allow"))
+
+
 class StreamEventsTests(unittest.TestCase):
-    def run_with_streams(self, items, streams, *, max_turns=10, tool_results=None):
+    def run_with_streams(
+        self,
+        items,
+        streams,
+        *,
+        max_turns=10,
+        tool_results=None,
+        policies=None,
+        preview=None,
+    ):
         responses = RecordingResponses(streams)
         fake_client = SimpleNamespace(responses=responses)
         execute = Mock(side_effect=tool_results) if tool_results is not None else Mock()
+        policies = policies or {}
+        permission_service = FakePermissionService(policies)
+        services = ServiceContainer(permission=permission_service)
+        checkpoints = []
 
-        with patch.object(loop, "client", fake_client), patch.object(
-            loop, "execute_tool", execute
+        with (
+            patch.object(loop, "client", fake_client),
+            patch.object(approval, "execute_tool", execute),
+            patch.object(approval, "preview_tool", return_value=preview),
         ):
-            events = list(loop.stream_events(items, max_turns=max_turns))
+            events = list(
+                loop.stream_events(
+                    items,
+                    services,
+                    max_turns=max_turns,
+                    on_approval=checkpoints.append,
+                )
+            )
 
+        self.checkpoints = checkpoints
+        self.permission_service = permission_service
         return events, responses.requests, execute
 
     def assert_responses_request(self, request):
@@ -275,6 +311,88 @@ class StreamEventsTests(unittest.TestCase):
             ["call_1", "call_2"],
         )
 
+    def test_ask_tool_is_checkpointed_before_it_can_execute(self):
+        items = [{"role": "user", "content": "overwrite the file"}]
+        write_call = item(
+            "function_call",
+            call_id="call_write",
+            name="write_file",
+            arguments='{"path":"notes/demo.txt","content":"new"}',
+        )
+        diff = {
+            "type": "code_diff",
+            "path": "notes/demo.txt",
+            "additions": 1,
+            "deletions": 1,
+            "lines": [
+                {"kind": "removed", "text": "old"},
+                {"kind": "added", "text": "new"},
+            ],
+        }
+
+        events, requests, execute = self.run_with_streams(
+            items,
+            [[completed([write_call])]],
+            policies={"write_file": "ask"},
+            preview=diff,
+        )
+
+        self.assertEqual(len(requests), 1)
+        execute.assert_not_called()
+        self.assertEqual(len(self.checkpoints), 1)
+        self.assertEqual(self.checkpoints[0]["remaining_turns"], 9)
+        self.assertEqual(
+            events,
+            [
+                {
+                    "type": "tool_call",
+                    "id": "call_write",
+                    "name": "write_file",
+                    "args": {"path": "notes/demo.txt", "content": "new"},
+                    "approval_required": True,
+                    "preview": diff,
+                },
+                {"type": "approval_required", "call_ids": ["call_write"]},
+            ],
+        )
+        self.assertIs(items[-1], write_call)
+        self.assertFalse(
+            any(
+                isinstance(entry, dict) and entry.get("type") == "function_call_output"
+                for entry in items
+            )
+        )
+
+    def test_denied_tool_returns_output_without_approval_or_execution(self):
+        items = [{"role": "user", "content": "overwrite the file"}]
+        write_call = item(
+            "function_call",
+            call_id="call_write",
+            name="write_file",
+            arguments='{"path":"notes/demo.txt","content":"new"}',
+        )
+        final_message = item(
+            "message",
+            role="assistant",
+            content=[{"type": "output_text", "text": "没有写入"}],
+        )
+
+        events, requests, execute = self.run_with_streams(
+            items,
+            [
+                [completed([write_call])],
+                [completed([final_message], output_text="没有写入")],
+            ],
+            policies={"write_file": "deny"},
+        )
+
+        execute.assert_not_called()
+        self.assertEqual(self.checkpoints, [])
+        self.assertEqual(len(requests), 2)
+        self.assertIn("权限规则拒绝", events[1]["content"])
+        self.assertEqual(events[1]["outcome"], "denied")
+        self.assertNotIn("approval_required", [event["type"] for event in events])
+
     def test_failed_response_becomes_error_event(self):
         failure = response(
             output=[],
@@ -319,9 +437,12 @@ class StreamEventsTests(unittest.TestCase):
     def test_request_exception_becomes_error_event(self):
         create = Mock(side_effect=ConnectionError("network down"))
         fake_client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        services = ServiceContainer(permission=FakePermissionService())
 
         with patch.object(loop, "client", fake_client):
-            events = list(loop.stream_events([{"role": "user", "content": "hello"}]))
+            events = list(
+                loop.stream_events([{"role": "user", "content": "hello"}], services)
+            )
 
         self.assertEqual(events, [{"type": "error", "message": "ConnectionError: network down"}])
         create.assert_called_once()
@@ -372,6 +493,23 @@ class StreamEventsTests(unittest.TestCase):
 
         self.assertEqual([entry["type"] for entry in events], ["error"])
         self.assertIn("JSONDecodeError", events[0]["message"])
+        self.assertEqual(len(requests), 1)
+        execute.assert_not_called()
+
+    def test_non_object_function_arguments_become_error_event(self):
+        bad_call = item(
+            "function_call",
+            call_id="call_bad",
+            name="calculate",
+            arguments='["1 + 2"]',
+        )
+        events, requests, execute = self.run_with_streams(
+            [{"role": "user", "content": "hello"}],
+            [[completed([bad_call])]],
+        )
+
+        self.assertEqual([entry["type"] for entry in events], ["error"])
+        self.assertIn("必须是 JSON 对象", events[0]["message"])
         self.assertEqual(len(requests), 1)
         execute.assert_not_called()
 

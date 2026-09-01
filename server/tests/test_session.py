@@ -105,6 +105,62 @@ class SessionResponseItemsTests(unittest.TestCase):
         self.assertEqual(session.summary, "question")
         self.assertEqual(session.last_exchange, ("question", "answer"))
 
+    def test_pending_approval_survives_json_round_trip(self):
+        pending = {
+            "schema_version": 2,
+            "remaining_turns": 9,
+            "outputs_committed": False,
+            "calls": [
+                {
+                    "id": "call_write",
+                    "name": "write_file",
+                    "args": {"path": "notes/demo.txt", "content": "new"},
+                    "permission": {
+                        "action": "ask",
+                        "requests": [
+                            {"permission": "write", "target": "notes/demo.txt"}
+                        ],
+                        "reason": "测试规则",
+                    },
+                    "decision": None,
+                    "outcome": None,
+                    "output": None,
+                    "preview": {
+                        "type": "code_diff",
+                        "path": "notes/demo.txt",
+                        "additions": 1,
+                        "deletions": 0,
+                        "lines": [{"kind": "added", "text": "new"}],
+                    },
+                }
+            ],
+        }
+        session = Session(
+            id=11,
+            items=[{"role": "user", "content": "write"}],
+            pending_approval=pending,
+        )
+
+        restored = Session.from_dict(json.loads(json.dumps(session.to_dict())))
+
+        self.assertEqual(restored.pending_approval, pending)
+        self.assertEqual(restored.to_dict(), session.to_dict())
+
+    def test_unsupported_pending_approval_version_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "不支持的待审批状态版本"):
+            Session.from_dict(
+                {
+                    "id": 12,
+                    "items": [],
+                    "pending_approval": {
+                        "schema_version": 1,
+                        "remaining_turns": 9,
+                        "outputs_committed": False,
+                        "calls": [],
+                    },
+                }
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

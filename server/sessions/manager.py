@@ -37,6 +37,9 @@ class SessionManager:
     def current(self) -> Session:
         return self._sessions[self._current_id]
 
+    def get(self, session_id: int) -> Session | None:
+        return self._sessions.get(session_id)
+
     def listing(self) -> list[tuple[bool, Session]]:
         """返回 (是否为当前会话, 会话) 列表，按 id 升序"""
         return [(sid == self._current_id, s) for sid, s in sorted(self._sessions.items())]
@@ -78,10 +81,16 @@ class SessionManager:
         此刻 Items 里的 function_call 与 function_call_output 是配对完整的，
         落盘的文件因此永远合法；空会话不写，避免产生无内容的文件。
         """
-        session = self.current
+        self.save(self.current)
+
+    def save(self, session: Session) -> None:
+        """保存明确指定的会话，避免请求结束时 current 已被切换。"""
         if session.is_empty:
             return
 
         DATA_DIR.mkdir(exist_ok=True)
         content = json.dumps(session.to_dict(), ensure_ascii=False, indent=2)
-        (DATA_DIR / f"{session.id}.json").write_text(content, encoding="utf-8")
+        target = DATA_DIR / f"{session.id}.json"
+        temporary = DATA_DIR / f".{session.id}.tmp"
+        temporary.write_text(content, encoding="utf-8")
+        temporary.replace(target)

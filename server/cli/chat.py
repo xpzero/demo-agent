@@ -1,19 +1,22 @@
 from agent import SYSTEM_PROMPT
+from services import ServiceContainer
 from sessions import SessionManager, handle_command
 
 from .render import render_events
 
 
-def run_agent(user_input: str, max_turns: int = 10) -> None:
+def run_agent(
+    user_input: str, services: ServiceContainer, max_turns: int = 10
+) -> None:
     """单次任务：跑完一个输入的工具循环就结束"""
     items = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_input},
     ]
-    render_events(items, max_turns)
+    render_events(items, services, max_turns)
 
 
-def chat() -> None:
+def chat(services: ServiceContainer) -> None:
     """多轮对话：各会话的 Items 相互隔离，每轮结束后持久化当前会话"""
     manager = SessionManager(SYSTEM_PROMPT)
 
@@ -31,5 +34,5 @@ def chat() -> None:
 
         items = manager.current.items
         items.append({"role": "user", "content": user_input})
-        render_events(items)
+        render_events(items, services, session_id=manager.current.id)
         manager.save_current()

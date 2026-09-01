@@ -37,10 +37,83 @@ def _clip(text: str, limit: int) -> str:
     return f"{single_line[:limit]}…" if len(single_line) > limit else single_line
 
 
+def _pending_approval(data: object) -> dict | None:
+    if data is None:
+        return None
+    if not isinstance(data, dict) or data.get("schema_version") != 2:
+        raise ValueError("不支持的待审批状态版本")
+    if (
+        not isinstance(data.get("remaining_turns"), int)
+        or isinstance(data.get("remaining_turns"), bool)
+        or data["remaining_turns"] < 0
+        or not isinstance(data.get("outputs_committed"), bool)
+    ):
+        raise ValueError("待审批状态包含无效运行信息")
+    if not isinstance(data.get("calls"), list):
+        raise ValueError("待审批状态缺少 calls")
+
+    calls = []
+    for value in data["calls"]:
+        if not isinstance(value, dict):
+            raise ValueError("待审批工具调用必须是对象")
+        permission = value.get("permission")
+        if not isinstance(permission, dict) or permission.get("action") not in {
+            "allow",
+            "ask",
+            "deny",
+        }:
+            raise ValueError("待审批工具调用缺少有效权限结果")
+        requests = permission.get("requests")
+        if not isinstance(requests, list) or any(
+            not isinstance(request, dict)
+            or not isinstance(request.get("permission"), str)
+            or not request["permission"]
+            or not isinstance(request.get("target"), str)
+            for request in requests
+        ):
+            raise ValueError("待审批工具调用包含无效权限请求")
+        if (
+            not isinstance(value.get("id"), str)
+            or not isinstance(value.get("name"), str)
+            or not isinstance(value.get("args"), dict)
+        ):
+            raise ValueError("待审批工具调用缺少基本字段")
+
+        call = dict(value)
+        if call.get("decision") == "denied":
+            call["decision"] = None
+            call["outcome"] = "denied"
+        else:
+            call.setdefault(
+                "outcome",
+                "rejected"
+                if call.get("decision") == "rejected"
+                else "completed"
+                if call.get("output") is not None
+                else None,
+            )
+        if call.get("decision") not in {None, "approved", "rejected"}:
+            raise ValueError("待审批工具调用包含无效用户决定")
+        if call.get("outcome") not in {
+            None,
+            "completed",
+            "rejected",
+            "denied",
+            "failed",
+        }:
+            raise ValueError("待审批工具调用包含无效执行结果")
+        calls.append(call)
+
+    normalized = dict(data)
+    normalized["calls"] = calls
+    return normalized
+
+
 @dataclass
 class Session:
     id: int
     items: list
+    pending_approval: dict | None = None
 
     @property
     def summary(self) -> str:
@@ -74,8 +147,15 @@ class Session:
         return not any(_field(item, "role") == "user" for item in self.items)
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "items": [_to_plain(item) for item in self.items]}
+        data = {"id": self.id, "items": [_to_plain(item) for item in self.items]}
+        if self.pending_approval is not None:
+            data["pending_approval"] = self.pending_approval
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "Session":
-        return cls(id=int(data["id"]), items=list(data["items"]))
+        return cls(
+            id=int(data["id"]),
+            items=list(data["items"]),
+            pending_approval=_pending_approval(data.get("pending_approval")),
+        )
