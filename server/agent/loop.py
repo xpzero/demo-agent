@@ -22,6 +22,7 @@ def stream_events(
     services: ServiceContainer,
     max_turns: int = 10,
     on_approval: Callable[[dict], None] | None = None,
+    on_checkpoint: Callable[[], None] | None = None,
     session_id: int | None = None,
 ) -> Iterator[dict]:
     """agent loop 的核心：流式请求模型、执行工具，把过程产出为结构化事件。
@@ -93,6 +94,9 @@ def stream_events(
 
             if not awaiting:
                 commit_outputs(items, batch, services.permission, session_id)
+                # 自动工具调用已经与结果配对，先保存再暴露工具结果或进入下一轮。
+                if on_checkpoint is not None:
+                    on_checkpoint()
 
             for call in batch["calls"]:
                 call_event = {

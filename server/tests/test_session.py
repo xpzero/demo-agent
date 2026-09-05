@@ -61,7 +61,8 @@ class SessionResponseItemsTests(unittest.TestCase):
         self.assertFalse(session.is_empty)
 
         plain = session.to_dict()
-        self.assertEqual(set(plain), {"id", "items"})
+        self.assertEqual(set(plain), {"id", "items", "revision"})
+        self.assertEqual(plain["revision"], 0)
         self.assertIs(plain["items"][0], session.items[0])
         self.assertEqual(plain["items"][-1]["content"][0]["text"], "列表形式的模型回答")
         self.assertIs(assistant_message.last_exclude_none, True)
@@ -87,7 +88,7 @@ class SessionResponseItemsTests(unittest.TestCase):
 
     def test_from_dict_accepts_items_payload(self):
         payload = {
-            "id": "9",
+            "id": 9,
             "items": [
                 {"role": "user", "content": "question"},
                 {
@@ -104,6 +105,20 @@ class SessionResponseItemsTests(unittest.TestCase):
         self.assertEqual(session.items, payload["items"])
         self.assertEqual(session.summary, "question")
         self.assertEqual(session.last_exchange, ("question", "answer"))
+
+    def test_from_dict_rejects_invalid_top_level_fields(self):
+        invalid_payloads = [
+            {"id": True, "items": []},
+            {"id": 0, "items": []},
+            {"id": "9", "items": []},
+            {"id": 9, "items": "not-a-list"},
+            {"id": 9, "items": [], "revision": -1},
+            {"id": 9, "items": [], "revision": True},
+        ]
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                Session.from_dict(payload)
 
     def test_pending_approval_survives_json_round_trip(self):
         pending = {
@@ -137,7 +152,16 @@ class SessionResponseItemsTests(unittest.TestCase):
         }
         session = Session(
             id=11,
-            items=[{"role": "user", "content": "write"}],
+            items=[
+                {"role": "user", "content": "write"},
+                {
+                    "type": "function_call",
+                    "id": "fc_write",
+                    "call_id": "call_write",
+                    "name": "write_file",
+                    "arguments": '{"path":"notes/demo.txt","content":"new"}',
+                },
+            ],
             pending_approval=pending,
         )
 
@@ -157,6 +181,115 @@ class SessionResponseItemsTests(unittest.TestCase):
                         "remaining_turns": 9,
                         "outputs_committed": False,
                         "calls": [],
+                    },
+                }
+            )
+
+    def test_committed_pending_requires_matching_output_item(self):
+        with self.assertRaisesRegex(ValueError, "Items 缺少.*工具结果"):
+            Session.from_dict(
+                {
+                    "id": 13,
+                    "items": [
+                        {
+                            "type": "function_call",
+                            "call_id": "call_1",
+                            "name": "calculate",
+                            "arguments": '{"expression":"1+1"}',
+                        }
+                    ],
+                    "pending_approval": {
+                        "schema_version": 2,
+                        "remaining_turns": 9,
+                        "outputs_committed": True,
+                        "calls": [
+                            {
+                                "id": "call_1",
+                                "name": "calculate",
+                                "args": {"expression": "1+1"},
+                                "permission": {
+                                    "action": "ask",
+                                    "requests": [
+                                        {
+                                            "permission": "calculate",
+                                            "target": "1+1",
+                                        }
+                                    ],
+                                    "reason": "test",
+                                },
+                                "decision": "approved",
+                                "outcome": "completed",
+                                "output": "2",
+                            }
+                        ],
+                    },
+                }
+            )
+
+    def test_persisted_approval_requires_an_execution_result(self):
+        with self.assertRaisesRegex(ValueError, "决定与执行结果不一致"):
+            Session.from_dict(
+                {
+                    "id": 14,
+                    "items": [],
+                    "pending_approval": {
+                        "schema_version": 2,
+                        "remaining_turns": 9,
+                        "outputs_committed": False,
+                        "calls": [
+                            {
+                                "id": "call_1",
+                                "name": "calculate",
+                                "args": {"expression": "1+1"},
+                                "permission": {
+                                    "action": "ask",
+                                    "requests": [
+                                        {
+                                            "permission": "calculate",
+                                            "target": "1+1",
+                                        }
+                                    ],
+                                    "reason": "test",
+                                },
+                                "decision": "approved",
+                                "outcome": None,
+                                "output": None,
+                            }
+                        ],
+                    },
+                }
+            )
+
+    def test_pending_approval_requires_matching_function_call(self):
+        with self.assertRaisesRegex(ValueError, "function_call 不匹配"):
+            Session.from_dict(
+                {
+                    "id": 15,
+                    "items": [{"role": "user", "content": "write"}],
+                    "pending_approval": {
+                        "schema_version": 2,
+                        "remaining_turns": 9,
+                        "outputs_committed": False,
+                        "calls": [
+                            {
+                                "id": "call_1",
+                                "name": "write_file",
+                                "args": {"path": "notes/demo.txt", "content": "new"},
+                                "permission": {
+                                    "action": "ask",
+                                    "requests": [
+                                        {
+                                            "permission": "write",
+                                            "target": "notes/demo.txt",
+                                        }
+                                    ],
+                                    "reason": "test",
+                                },
+                                "decision": None,
+                                "outcome": None,
+                                "output": None,
+                            }
+                        ],
                     },
                 }
             )

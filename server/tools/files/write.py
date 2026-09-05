@@ -101,6 +101,8 @@ def run_approved(args: dict, guard: dict | None) -> str:
 
         existed = target.exists()
         content = target.read_text(encoding="utf-8") if existed else ""
+        if existed and content == args["content"]:
+            return f"已写入 {target.relative_to(ROOT)}（{len(content)} 字符）"
         if existed != guard["existed"] or _content_hash(content) != guard["content_hash"]:
             raise ValueError("文件内容在审批后发生变化，请重新查看 Diff")
 

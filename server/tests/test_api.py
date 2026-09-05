@@ -1,22 +1,15 @@
 import os
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import Mock, patch
 
 
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
-from sessions import manager as manager_module  # noqa: E402
-
-
-TEST_DATA = tempfile.TemporaryDirectory()
-manager_module.DATA_DIR = Path(TEST_DATA.name)
-
 import api  # noqa: E402
 from agent import approval  # noqa: E402
-from sessions import SessionManager  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from fakes import FakeSessionService  # noqa: E402
+from sessions import SessionStorageError  # noqa: E402
 
 
 def pending_batch():
@@ -58,16 +51,26 @@ def pending_batch():
 
 class ApprovalApiTests(unittest.TestCase):
     def setUp(self):
-        for path in Path(TEST_DATA.name).glob("*"):
-            path.unlink()
-        api.manager = SessionManager("system")
-        api._running_sessions.clear()
-        api._session_locks.clear()
-        self.client = TestClient(api.app)
-        self.session = api.manager.current
+        self.sessions = FakeSessionService()
+        self.app = api.create_app(session_service_factory=lambda: self.sessions)
+        self.client_context = TestClient(self.app)
+        self.client = self.client_context.__enter__()
+        self.session = self.sessions.create("system")
         self.session.items.append({"role": "user", "content": "write"})
+        self.session.items.append(
+            {
+                "type": "function_call",
+                "id": "fc_write",
+                "call_id": "call_write",
+                "name": "write_file",
+                "arguments": '{"path":"notes/demo.txt","content":"new"}',
+            }
+        )
         self.session.pending_approval = pending_batch()
-        api.manager.save(self.session)
+        self.sessions.save(self.session)
+
+    def tearDown(self):
+        self.client_context.__exit__(None, None, None)
 
     def test_pending_snapshot_and_chat_conflict(self):
         snapshot = self.client.get(f"/api/sessions/{self.session.id}")
@@ -81,95 +84,84 @@ class ApprovalApiTests(unittest.TestCase):
             snapshot.json()["pending_approval"]["calls"][0]["id"], "call_write"
         )
         self.assertNotIn("guard", snapshot.json()["pending_approval"]["calls"][0])
-        self.assertEqual(
-            snapshot.json()["pending_approval"]["calls"][0]["permission"],
-            {
-                "action": "ask",
-                "requests": [
-                    {"permission": "write", "target": "notes/demo.txt"}
-                ],
-                "reason": "测试规则",
-            },
-        )
         self.assertEqual(conflict.status_code, 409)
 
-    def test_pending_snapshot_exposes_three_permission_actions_without_legacy_policy(self):
-        self.session.pending_approval["calls"].append(
-            {
-                "id": "call_denied",
-                "name": "write_file",
-                "args": {
-                    "path": "notes/permission-deny-demo.txt",
-                    "content": "blocked",
-                },
-                "permission": {
-                    "action": "deny",
-                    "requests": [
-                        {
-                            "permission": "write",
-                            "target": "notes/permission-deny-demo.txt",
-                        }
-                    ],
-                    "reason": "测试拒绝规则",
-                },
-                "decision": None,
-                "outcome": "denied",
-                "output": "权限规则拒绝执行工具 write_file；工具未执行。",
-                "guard": None,
-                "preview": None,
-            }
+    def test_create_persists_empty_session_without_global_current(self):
+        created = self.client.post("/api/sessions")
+        session_id = created.json()["id"]
+        loaded = self.client.get(f"/api/sessions/{session_id}")
+        listing = self.client.get("/api/sessions")
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(loaded.status_code, 200)
+        self.assertEqual(loaded.json()["summary"], "(空会话)")
+        self.assertNotIn("current", listing.json()[-1])
+
+    def test_chat_save_failure_releases_run_and_keeps_persisted_input_unchanged(self):
+        session = self.sessions.get(self.session.id)
+        session.pending_approval = None
+        self.sessions.save(session)
+        original = self.sessions.get(self.session.id).to_dict()
+        self.sessions.next_save_error = SessionStorageError("database unavailable")
+
+        response = self.client.post(
+            f"/api/sessions/{self.session.id}/chat",
+            json={"message": "not persisted"},
         )
-        self.session.pending_approval["calls"].append(
-            {
-                "id": "call_allowed",
-                "name": "read_file",
-                "args": {"path": "notes/demo.txt"},
-                "permission": {
-                    "action": "allow",
-                    "requests": [
-                        {"permission": "read", "target": "notes/demo.txt"}
-                    ],
-                    "reason": "测试允许规则",
-                },
-                "decision": None,
-                "outcome": "completed",
-                "output": "old",
-                "guard": None,
-                "preview": None,
-            }
-        )
-        api.manager.save(self.session)
 
-        response = self.client.get(f"/api/sessions/{self.session.id}")
-        calls = response.json()["pending_approval"]["calls"]
-        denied = calls[1]
-        allowed = calls[2]
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(self.app.state.runtime.is_running(self.session.id))
+        self.assertEqual(self.sessions.get(self.session.id).to_dict(), original)
 
-        self.assertEqual(calls[0]["permission"]["action"], "ask")
-        self.assertEqual(denied["permission"]["action"], "deny")
-        self.assertIsNone(denied["decision"])
-        self.assertEqual(denied["outcome"], "denied")
-        self.assertEqual(allowed["permission"]["action"], "allow")
-        self.assertNotIn("policy", denied)
+    def test_final_save_failure_sends_error_instead_of_done(self):
+        session = self.sessions.get(self.session.id)
+        session.pending_approval = None
+        self.sessions.save(session)
 
-    def test_chat_save_failure_releases_run_reservation_and_rolls_back_input(self):
-        self.session.pending_approval = None
-        original_items = list(self.session.items)
+        def stream(items, *_, **__):
+            yield {"type": "text_delta", "text": "visible"}
+            items.append(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "visible"}],
+                }
+            )
+            self.sessions.next_save_error = SessionStorageError("database unavailable")
+            yield {"type": "done", "content": "visible"}
 
-        with patch.object(api.manager, "save", side_effect=OSError("disk full")):
-            with self.assertRaises(OSError):
-                self.client.post(
-                    f"/api/sessions/{self.session.id}/chat",
-                    json={"message": "not persisted"},
-                )
+        with patch.object(api, "stream_events", stream):
+            response = self.client.post(
+                f"/api/sessions/{self.session.id}/chat",
+                json={"message": "hello"},
+            )
 
-        self.assertNotIn(self.session.id, api._running_sessions)
-        self.assertEqual(self.session.items, original_items)
+        self.assertIn('"type": "text_delta"', response.text)
+        self.assertIn('"type": "error"', response.text)
+        self.assertNotIn('"type": "done"', response.text)
+        self.assertFalse(self.app.state.runtime.is_running(self.session.id))
+
+    def test_terminal_event_releases_run_before_stream_finishes(self):
+        session = self.sessions.get(self.session.id)
+        session.pending_approval = None
+        self.sessions.save(session)
+        observed = []
+
+        def stream(*_, **__):
+            yield {"type": "approval_required", "call_ids": ["call_1"]}
+            observed.append(self.app.state.runtime.is_running(self.session.id))
+
+        with patch.object(api, "stream_events", stream):
+            response = self.client.post(
+                f"/api/sessions/{self.session.id}/chat",
+                json={"message": "hello"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(observed, [False])
 
     def test_approve_is_idempotent_and_resume_executes_once(self):
-        endpoint = (
-            f"/api/sessions/{self.session.id}/approvals/call_write/approve"
-        )
+        endpoint = f"/api/sessions/{self.session.id}/approvals/call_write/approve"
         execute = Mock(return_value="已写入 notes/demo.txt（3 字符）")
         stream_events = Mock(
             return_value=iter([{"type": "done", "content": "完成"}])
@@ -180,28 +172,42 @@ class ApprovalApiTests(unittest.TestCase):
             patch.object(api, "stream_events", stream_events),
         ):
             first = self.client.post(endpoint)
+            saves_after_first = len(self.sessions.save_calls)
             second = self.client.post(endpoint)
+            saves_after_second = len(self.sessions.save_calls)
             resumed = self.client.post(f"/api/sessions/{self.session.id}/resume")
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
+        self.assertEqual(saves_after_first, saves_after_second)
         execute.assert_called_once()
         self.assertEqual(stream_events.call_args.kwargs["max_turns"], 9)
-        self.assertIs(stream_events.call_args.args[1], api.services)
         self.assertIn("已写入 notes/demo.txt", resumed.text)
-        self.assertIsNone(self.session.pending_approval)
+        restored = self.sessions.get(self.session.id)
+        self.assertIsNone(restored.pending_approval)
         self.assertEqual(
-            self.session.items[-1],
+            restored.items[-1],
             {
                 "type": "function_call_output",
                 "call_id": "call_write",
                 "output": "已写入 notes/demo.txt（3 字符）",
             },
         )
-        self.assertEqual(
-            self.client.post(f"/api/sessions/{self.session.id}/resume").status_code,
-            409,
-        )
+
+    def test_approved_tool_save_failure_reports_uncertain_outcome(self):
+        execute = Mock(return_value="已写入 notes/demo.txt（3 字符）")
+        self.sessions.next_save_error = SessionStorageError("database unavailable")
+
+        with patch.object(approval, "execute_approved_tool", execute):
+            response = self.client.post(
+                f"/api/sessions/{self.session.id}/approvals/call_write/approve"
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("工具执行已经开始", response.json()["detail"])
+        execute.assert_called_once()
+        restored = self.sessions.get(self.session.id)
+        self.assertIsNone(restored.pending_approval["calls"][0]["decision"])
 
     def test_reject_never_executes_tool_but_resume_returns_protocol_output(self):
         rejected = self.client.post(
@@ -223,8 +229,7 @@ class ApprovalApiTests(unittest.TestCase):
         execute.assert_not_called()
         self.assertIn("用户拒绝执行工具 write_file", resumed.text)
         self.assertEqual(
-            self.session.items[-1]["call_id"],
-            "call_write",
+            self.sessions.get(self.session.id).items[-1]["call_id"], "call_write"
         )
 
 

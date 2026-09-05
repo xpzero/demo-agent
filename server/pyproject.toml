@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.141.1",
     "openai>=2.53.0",
+    "psycopg[binary,pool]>=3.2,<4",
     "python-dotenv>=1.2.2",
     "tavily-python>=0.7.27",
     "uvicorn>=0.52.1",

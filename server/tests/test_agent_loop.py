@@ -74,6 +74,7 @@ class StreamEventsTests(unittest.TestCase):
         permission_service = FakePermissionService(policies)
         services = ServiceContainer(permission=permission_service)
         checkpoints = []
+        durable_checkpoints = []
 
         with (
             patch.object(loop, "client", fake_client),
@@ -86,10 +87,12 @@ class StreamEventsTests(unittest.TestCase):
                     services,
                     max_turns=max_turns,
                     on_approval=checkpoints.append,
+                    on_checkpoint=lambda: durable_checkpoints.append(list(items)),
                 )
             )
 
         self.checkpoints = checkpoints
+        self.durable_checkpoints = durable_checkpoints
         self.permission_service = permission_service
         return events, responses.requests, execute
 
@@ -276,6 +279,22 @@ class StreamEventsTests(unittest.TestCase):
             final_message,
         ]
         self.assertEqual(items, expected_all)
+        self.assertEqual(len(self.durable_checkpoints), 1)
+        self.assertEqual(
+            self.durable_checkpoints[0][-2:],
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_add",
+                    "output": "3",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_multiply",
+                    "output": "6",
+                },
+            ],
+        )
 
     def test_function_calls_stop_at_max_turns(self):
         items = [{"role": "user", "content": "keep calling"}]
@@ -306,6 +325,7 @@ class StreamEventsTests(unittest.TestCase):
         self.assertNotIn("done", [event["type"] for event in events])
         self.assertEqual(len(requests), 2)
         self.assertEqual(execute.call_count, 2)
+        self.assertEqual(len(self.durable_checkpoints), 2)
         self.assertEqual(
             [entry["call_id"] for entry in items if isinstance(entry, dict) and entry.get("type") == "function_call_output"],
             ["call_1", "call_2"],
@@ -388,6 +408,7 @@ class StreamEventsTests(unittest.TestCase):
 
         execute.assert_not_called()
         self.assertEqual(self.checkpoints, [])
+        self.assertEqual(len(self.durable_checkpoints), 1)
         self.assertEqual(len(requests), 2)
         self.assertIn("权限规则拒绝", events[1]["content"])
         self.assertEqual(events[1]["outcome"], "denied")

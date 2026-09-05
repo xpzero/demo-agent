@@ -75,6 +75,24 @@ class WriteFilePreviewTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "approved\n")
             self.assertIn("已写入 notes/demo.txt", result)
 
+    def test_approved_write_retry_accepts_already_applied_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "notes" / "demo.txt"
+            target.parent.mkdir()
+            target.write_text("old\n", encoding="utf-8")
+            args = {"path": "notes/demo.txt", "content": "approved\n"}
+
+            with patch.object(write, "ROOT", root), patch.object(
+                write, "resolve", side_effect=lambda path: (root / path).resolve()
+            ):
+                preview = write.preview(args)
+                write.run_approved(args, preview["_guard"])
+                retried = write.run_approved(args, preview["_guard"])
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "approved\n")
+            self.assertIn("已写入 notes/demo.txt", retried)
+
     def test_session_data_directory_is_blocked(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

@@ -5,9 +5,9 @@
 ## 项目定位与事实来源
 
 - 这是一个教学型 Agent 项目：不依赖 Agent 框架，直接使用 OpenAI Python SDK 的 Responses API。
-- 后端位于 `server/`，使用 Python 3.12、FastAPI、OpenAI SDK、Tavily 和 uv。
+- 后端位于 `server/`，使用 Python 3.12、FastAPI、OpenAI SDK、Tavily、PostgreSQL、Psycopg 3 和 uv。
 - 前端位于 `web/`，使用 React、TypeScript、Vite、assistant-ui，以及当前工作树中的 Tailwind CSS / Radix 风格组件。
-- 实际后端入口是 `server/main.py`（CLI）和 `server/api.py`（HTTP/SSE）；实际依赖清单是 `server/pyproject.toml` 与 `server/uv.lock`。
+- 实际后端入口是 `server/main.py`（CLI）和 `server/api.py`（HTTP/SSE）；数据库 migration 入口是 `server/migrate.py`；实际依赖清单是 `server/pyproject.toml` 与 `server/uv.lock`。
 - 根目录的 `main.py`、`pyproject.toml` 和 `.python-version` 是早期空脚手架，不是后端运行环境。
 - 当前代码与依赖清单是实现事实来源。根 README 同时包含历史演进示例；不要把旧版本片段误当成当前实现。架构、命令、事件协议或已知限制改变时，同步更新相关 README。
 
@@ -16,6 +16,7 @@
 - 先查看 `git status --short`，识别并保留用户已有改动。本仓库可能处于脏工作树；不要顺手格式化、删除或重写任务范围外的文件。
 - 不直接查看、打印、修改或提交 `server/.env` 的内容。应用通过 `load_dotenv()` 正常加载配置不受此限；配置文档只引用 `server/.env.example` 和占位值。
 - `server/.sessions/` 含完整对话、工具结果和 encrypted reasoning，属于敏感运行时数据；除非任务明确要求，不读取、不改写、不提交。
+- PostgreSQL `sessions` 表及数据库备份包含相同敏感数据。测试只使用独立的 `TEST_DATABASE_URL`，不得连接、清空或迁移开发/生产数据库。
 - 不编辑或提交 `.venv/`、`node_modules/`、`web/dist/`、`__pycache__/`、缓存或其他生成物。
 - 除非用户明确要求，不创建提交、不切换或新建分支、不推送远端。
 
@@ -35,6 +36,8 @@ make init
 make dev
 make dev-backend
 make dev-frontend
+make db-migrate
+make test-backend
 ```
 
 运行 CLI：
@@ -64,7 +67,7 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 
 - `server/agent/`：OpenAI 客户端配置与唯一 Agent 内核。
 - `server/tools/`：工具 schema、实现、注册和执行分发。
-- `server/sessions/`：Items 会话模型、本地持久化和 CLI 会话命令。
+- `server/sessions/`：Items 会话模型、SessionService、PostgreSQL 持久化、旧 JSON 导入和 CLI 会话命令。
 - `server/cli/`：终端输入循环与事件呈现。
 - `server/api.py`：FastAPI 路由、CORS 和项目事件到 SSE 的传输映射。
 - `web/src/adapter.ts`：HTTP 请求、SSE 分帧及项目事件到 assistant-ui message parts 的映射。
@@ -142,14 +145,15 @@ OpenAI 到后端是 Responses typed event 流；后端到消费者是项目自�
 
 ## 会话格式、保存时机与并发
 
-- `Session` 保存 `id`、`items`，审批暂停时还保存 `pending_approval`；新会话以 system message Item 开始。
+- `Session` 保存 `id`、`items`、`revision`，审批暂停时还保存 `pending_approval`；新会话以 system message Item 开始并立即写入 PostgreSQL。
 - 加载器只接受 Items 格式。不要恢复旧 `messages`、assistant `tool_calls` 或 `role="tool"` 兼容层，除非任务明确要求一次新的迁移设计。
-- SDK 返回的 Pydantic Items 落盘前使用 `model_dump(exclude_none=True)`；从 JSON 加载的普通字典必须仍可作为 Responses input 重放。
-- 正常完成时保存配对完整的 function call 与 output；等待审批时允许暂存未配对调用，但 `pending_approval` 必须完整记录同轮所有调用。任何修改都必须考虑错误和客户端取消路径。
-- `server/api.py` 按明确的 `session_id` 获取和保存会话，并用进程内锁阻止同会话重复运行；`SessionManager.current` 仍服务 CLI 和列表显示，不得重新用于 HTTP 流结束时选取保存目标。
-- 进程内锁不解决多 worker、CLI 与 API 同时运行或多个进程写同一 JSON 的竞争。不要把当前实现描述为跨进程并发安全。
-- CLI 与 API 同时运行也会无锁共享 `server/.sessions/`，可能发生 ID 或文件覆盖冲突；不要将这种组合描述为受支持。
-- API/Session 测试必须把数据目录重定向到临时目录，绝不能读取或改写真实 `server/.sessions/`。
+- SDK 返回的 Pydantic Items 存入 JSONB 前使用 `model_dump(exclude_none=True)`；从 PostgreSQL 加载的普通字典必须仍可作为 Responses input 重放。
+- `SessionService.save()` 使用 revision 条件更新；成功提交后才推进内存对象的 revision，冲突时停止当前写入并重新加载数据库状态。
+- 正常完成时保存配对完整的 function call 与 output；自动工具轮次在发送工具事件和下一次模型请求前 checkpoint。等待审批时允许暂存未配对调用，但 `pending_approval` 必须完整记录同轮所有调用。
+- 文本 delta 继续实时发送；完整 `response.output` 写入成功后才发送 `done`。保存失败转成明确 error，并释放当前进程的运行状态。
+- `server/api.py` 按明确的 `session_id` 获取和保存会话，并用进程内锁阻止同会话重复运行。浏览器和 CLI 分别维护自己选择的当前 Session，后端没有全局 `current`。
+- 当前部署约定为单 worker。多 worker、CLI 与 API 竞争同一 Session 需要后续数据库租约；revision 只保护版本更新，不等同运行锁。
+- API 单元测试注入 FakeSessionService；PostgreSQL 集成测试只读取独立 `TEST_DATABASE_URL`。旧 `server/.sessions/` 只作为显式迁移源和备份。
 
 ## 编码、依赖与文档
 
@@ -158,6 +162,7 @@ OpenAI 到后端是 Responses typed event 流；后端到消费者是项目自�
 - 后端依赖变化同时更新 `server/pyproject.toml` 和 `server/uv.lock`；前端依赖变化同时更新 `web/package.json` 和 `web/pnpm-lock.yaml`。
 - 前端的 `@/*` alias 必须在 TypeScript 与 Vite 配置中保持一致。修改 assistant-ui message part 或工具 UI 时，以已安装版本的类型为准，不凭旧示例猜 API。
 - 当前浏览器把一条后端会话 ID 保存在 `localStorage`，可以在刷新后恢复待审批卡或继续已完成决定的审批批次；它仍没有会话列表、切换 UI 或完整聊天历史恢复。不要仅因后端有这些 API 就把它们描述成前端现有能力。
+- 数据库 schema 通过 `server/migrate.py` 和版本化 SQL 显式升级；应用启动只校验 schema。已执行 migration 文件不可修改，结构变化新增下一个版本。
 - README 的历史教学价值需要保留。重构时更新“当前结构”和“已知问题”，不要无意删掉用于解释 V1-V8 演进的旧版示例。
 
 ## 验证矩阵
@@ -165,6 +170,7 @@ OpenAI 到后端是 Responses typed event 流；后端到消费者是项目自�
 - 只改文档：检查路径、命令、字段和当前代码一致；无需把未运行的测试写成已通过。
 - 修改 Agent loop、工具协议或会话格式：运行完整后端 unittest。
 - 修改 API、SSE、项目事件或保存时机：运行完整后端 unittest，并运行前端 `pnpm lint` 与 `pnpm build`；同时补充中断、错误、事件顺序和保存目标测试。
+- 修改 SessionService、SQL 或 migration：除完整 unittest 外，设置独立 `TEST_DATABASE_URL` 运行 PostgreSQL 集成测试，并执行 `uv run python migrate.py` 验证 migration。测试数据库名应使用清晰的 `_test` 后缀。
 - 修改前端：至少运行 `pnpm lint` 与 `pnpm build`。仓库当前没有前端测试脚本；涉及文本—工具—文本映射时必须人工或新增测试验证 part 不丢失、不合并、不重排。
 - 修改 Python 依赖或锁文件：运行 `uv lock --check` 和受影响的后端测试。
 - 修改前端依赖或锁文件：使用锁定安装语义，并运行 `pnpm lint` 与 `pnpm build`。

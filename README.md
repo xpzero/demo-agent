@@ -5,7 +5,8 @@
 ## 环境
 
 - Python 3.12+，依赖用 [uv](https://github.com/astral-sh/uv) 管理
-- 核心依赖：`openai`、`python-dotenv`、`tavily-python`（联网搜索）
+- PostgreSQL，保存 Session、完整 Responses Items 和待审批状态
+- 核心依赖：`openai`、`python-dotenv`、`tavily-python`（联网搜索）、`psycopg`（PostgreSQL）
 
 ### 一条命令初始化前后端
 
@@ -29,9 +30,29 @@ OPENAI_BASE_URL=https://your-gateway  # 使用支持 Responses API 的自定义�
 MODEL=gpt-5.6-terra                   # 可按网关支持的模型替换
 SYSTEM_PROMPT=你是一个有用的助手，可以调用工具来帮助用户。
 TAVILY_API_KEY=tvly-xxx        # 仅联网搜索工具需要
+DATABASE_URL=postgresql://user:password@localhost:5432/demo_agent
+TEST_DATABASE_URL=postgresql://user:password@localhost:5432/demo_agent_test
 ```
 
 `MODEL` 和 `SYSTEM_PROMPT` 留空或不设置时，会分别使用当前代码中的默认值。
+
+准备好现有 PostgreSQL 数据库后，先创建表结构：
+
+```bash
+make db-migrate
+```
+
+migration 会记录已执行版本和 SQL 文件 checksum，可以安全重复运行。应用启动时只检查 schema，表结构更新始终通过这个显式命令执行。
+
+已有 `.sessions/*.json` 时，先停止正在写入会话的 API 和 CLI，备份该目录，再执行预检和导入：
+
+```bash
+cd server
+uv run python -m sessions.migrate_json --source .sessions --dry-run
+uv run python -m sessions.migrate_json --source .sessions --apply
+```
+
+导入会保留原 Session ID，并要求目标 `sessions` 表为空。原 JSON 文件继续保留为切换时刻的备份。
 
 初始化完成后，在项目根目录启动网页模式：
 
@@ -511,7 +532,7 @@ CLI 的 `render_events` 直接打印每个文本增量；FastAPI 的 `/api/sessi
 
 ### V8 · 多会话与 Items 持久化
 
-目标：不同话题互不污染，进程重启后还能继续上次对话。
+目标：不同话题互不污染，进程重启后还能继续上次对话。这一节记录的是项目最初使用 JSON 文件的历史版本。
 
 每条 `Session` 保存 `id` 与 `items`，等待人工确认时还会保存 `pending_approval`；`SessionManager` 负责新建、切换、删除和写入 `.sessions/<id>.json`。新会话从一条 system message Item 开始，用户输入、完整 `response.output` 与本地 `function_call_output` 随对话依次追加。
 
@@ -555,6 +576,26 @@ function_call
 ```
 
 规则引擎只是默认实现；`stream_events` 依赖的是 `PermissionService` 接口和 `ServiceContainer`，测试或后续实现可以注入另一套权限服务，而不修改 Agent loop。审批仍负责暂停、持久化与恢复，不负责决定规则。
+
+### V11 · PostgreSQL Session Service 与稳定 Checkpoint
+
+目标：让 API 与 CLI 通过统一的 `SessionService` 读写 Session，并把 PostgreSQL 作为持久化状态来源。
+
+每条 Session 保存 `id`、完整 `items`、`pending_approval` 和递增的 `revision`。保存使用 `WHERE revision = expected_revision` 条件更新：成功后 revision 加一，旧快照会得到明确冲突，不会静默覆盖新状态。
+
+```text
+API / CLI
+    ↓
+SessionService Protocol
+    ↓
+PostgresSessionService
+    ↓
+PostgreSQL sessions 表
+```
+
+Agent 的文本 delta 仍会立即通过 SSE 显示。完整 `response.output` 形成后才写入 Session；自动工具调用则在 `function_call` 与 `function_call_output` 配对后先 checkpoint，再发送工具事件并进入下一次模型请求。
+
+当前运行配置使用一个后端实例。进程内会话锁与运行 token 负责同 Session 串行执行，PostgreSQL revision 负责发现版本冲突；后续多实例阶段会继续增加 Session 租约。
 
 ## 与 ReAct 的关系
 
@@ -618,6 +659,10 @@ demo-agent/
 ├── server/                  # 后端：Agent 本体（Python / uv）
 │   ├── main.py              # CLI 入口
 │   ├── api.py               # FastAPI、会话接口与 SSE 输出
+│   ├── migrate.py           # 执行版本化 PostgreSQL migration
+│   ├── schema.py            # migration 加载、checksum 与 schema 检查
+│   ├── migrations/
+│   │   └── 0001_create_sessions.sql
 │   ├── agent/               # 模型交互
 │   │   ├── approval.py      # 审批批次、决定与工具结果提交
 │   │   ├── client.py        # OpenAI 客户端、MODEL、SYSTEM_PROMPT
@@ -625,9 +670,12 @@ demo-agent/
 │   ├── cli/                 # 终端交互与事件渲染
 │   │   ├── chat.py          # run_agent / chat
 │   │   └── render.py        # 把结构化事件渲染到终端
-│   ├── sessions/            # 多会话管理与持久化
-│   │   ├── session.py       # 会话容器
-│   │   ├── manager.py       # 加载、新建、切换、删除、保存
+│   ├── sessions/            # Session 模型与 PostgreSQL 持久化
+│   │   ├── session.py       # 会话容器、revision 与序列化
+│   │   ├── service.py       # SessionService 接口与领域异常
+│   │   ├── postgres.py      # PostgreSQL 实现与连接池
+│   │   ├── factory.py       # 从环境创建默认 Session Service
+│   │   ├── migrate_json.py  # 旧 JSON 显式导入工具
 │   │   └── commands.py      # /new /list /switch /del
 │   ├── services/            # 可注入服务及默认实现
 │   │   ├── container.py     # Agent 使用的显式依赖容器
@@ -638,13 +686,13 @@ demo-agent/
 │   │   ├── get_weather.py
 │   │   ├── files/           # 文件类（paths.py 做路径校验）
 │   │   └── web/             # 联网类（client.py 含截断与不可信标注）
-│   ├── .env                 # API key 与 base url
-│   └── .sessions/           # 会话数据（git 忽略）
+│   ├── .env                 # API key、base url 与 DATABASE_URL
+│   └── .sessions/           # 旧会话迁移源/备份（git 忽略）
 └── web/                     # Vite + React + assistant-ui 前端
     └── src/adapter.ts       # 调后端、解析 SSE、映射成 assistant-ui parts
 ```
 
-文件工具的根目录限定在 `server/` 内——Agent 读写不到 `web/` 与仓库根，`.env`、`.git` 与 `.sessions` 也禁止访问。会话同样由本地 `SessionManager` 管理：每条会话保存 `items`，审批暂停时额外保存 `pending_approval`。
+文件工具的根目录限定在 `server/` 内——Agent 读写不到 `web/` 与仓库根，`.env`、`.git` 与 `.sessions` 也禁止访问。会话由 `PostgresSessionService` 管理：每条会话保存 `items`、`revision`，审批暂停时额外保存 `pending_approval`。
 
 现有工具：
 
@@ -661,11 +709,11 @@ demo-agent/
 
 | 函数 | 职责 |
 |---|---|
-| `stream_events(items, services, max_turns, on_approval)` | 请求 Responses API，通过注入服务裁决工具调用并持久化审批点 |
+| `stream_events(items, services, max_turns, on_approval, on_checkpoint)` | 请求 Responses API，通过回调保存审批点和完整自动工具轮次 |
 | `execute_tool(name, args)` | 按名称执行一个本地工具，把工具异常转成可回灌的文本结果 |
 | `render_events(items, services, max_turns)` | 消费同一事件流并渲染到终端 |
 | `run_agent(user_input, services)` | 单次任务，跑完就结束 |
-| `chat(services)` | 多轮交互式对话，接入 `sessions/` 的多会话管理 |
+| `chat(services, session_service)` | 多轮交互式对话，接入 PostgreSQL Session Service |
 
 `stream_events` 是唯一的 Agent 内核。它把 OpenAI 的 `response.output_text.delta` 等事件翻译成项目自己的 `text_delta`、`tool_call`、`tool_result`、`approval_required`、`done`、`max_turns` 与 `error`；CLI 和 HTTP 只是两种消费者。这样前端不用理解 OpenAI 的完整事件协议，后端内部也不掺杂打印或页面逻辑。
 
@@ -676,6 +724,7 @@ demo-agent/
 - **工具结果必须带原始 `call_id`**：`function_call_output` 没有正确关联调用时，下一次请求会直接失败
 - **不必手拼流式工具参数**：本项目等 `response.completed` 后读取完整 `response.output`；只有要实时展示参数生成过程时才消费 `response.function_call_arguments.delta`
 - **工具输出统一成字符串**：`eval()` 可能返回 `int`，而当前工具事件和持久化格式都按字符串处理，所以 `calculate` 的返回值要 `str()` 包一层
+- **数据库保存成功才发送稳定完成事件**：文本 delta 可以实时展示；`done`、工具结果和审批卡都应在对应 Session checkpoint 成功后发送
 
 ## 已知问题
 
@@ -684,7 +733,8 @@ demo-agent/
 - `write_file` 获批后仍会直接覆盖文件，没有备份或事务，批准前必须检查完整 Diff
 - 没有上下文长度控制，多轮对话久了会超出 token 上限
 - 没有应用层重试策略；模型请求或流处理异常会转成 `error` 事件，但中断的任务不会自动续跑
-- HTTP 聊天和审批已按 `session_id` 取值、保存，并用进程内锁阻止同会话重复运行；多 worker、CLI 与 API 同时写 JSON 等跨进程并发仍不受支持
+- HTTP 聊天和审批按明确 `session_id` 读写 PostgreSQL，并用进程内锁阻止同会话重复运行；当前部署约定为单 worker，后续通过 Session 租约扩展多实例运行权
+- 整条 Session 以 JSONB 快照更新；长会话需要结合上下文压缩控制数据量和 checkpoint 成本
 
 ## 后续计划
 
@@ -692,11 +742,11 @@ demo-agent/
 
 当前每轮都会重放整份 `items`。后续需要在接近模型上下文上限前做截断、摘要或 compaction，同时保留尚未配对的 function call、关键事实与必要的 reasoning Item。
 
-### 2. 并发与持久化
+### 2. 多实例运行权与 Run 恢复
 
-- 把当前进程内运行保护扩展成完整的会话所有权与并发模型，并处理多 worker / 多进程竞争
-- 会话量上来后从 JSON 文件迁到 SQLite 等带并发控制的存储
-- 为流中断设计事务边界，避免把尚未完成的调用链落成半截上下文
+- 在现有 PostgreSQL Session 与 revision 上增加可续期租约，协调多 worker 和多机器
+- 区分 Session 与 Run，保存每次任务的状态和项目事件
+- 支持取消、重试、SSE 重连与中断恢复
 
 ### 3. 记忆系统（跨会话记忆）
 
