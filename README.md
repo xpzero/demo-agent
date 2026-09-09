@@ -60,7 +60,7 @@ uv run python -m sessions.migrate_json --source .sessions --apply
 make dev
 ```
 
-这会同时启动后端 `http://127.0.0.1:8000` 与前端；按 `Ctrl+C` 会停止两个进程。
+这会先检查 `8000` 和 `5173`，存在重复实例时明确失败；随后启动后端 `http://127.0.0.1:8000`，等待 Session API 就绪后再启动前端。按 `Ctrl+C` 会停止两个进程。Vite 固定使用 `5173`，不会静默切换到另一个端口。
 
 如需分别调试，也可以在两个终端运行：
 
@@ -73,6 +73,8 @@ make dev-frontend
 ```
 
 浏览器访问 Vite 输出的地址（默认 `http://localhost:5173`）。
+
+开发环境中的前端使用同源 `/api` 请求，由 Vite 代理到 `http://127.0.0.1:8000`，因此不会依赖浏览器跨域访问后端。若前后端独立部署，可以在构建前设置 `VITE_API_BASE_URL`；未设置时，部署环境需要把同源 `/api` 反向代理到后端。
 
 只使用命令行 Agent 时：
 

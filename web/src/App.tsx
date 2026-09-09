@@ -130,16 +130,31 @@ export default function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (initialState !== null) return;
+    if (initialState !== null || loadError !== null) return;
+    let cancelled = false;
     loadPendingMessages()
-      .then(setInitialState)
+      .then(state => {
+        if (!cancelled) setInitialState(state);
+      })
       .catch(error => {
-        setLoadError(error instanceof Error ? error.message : String(error));
+        if (!cancelled) {
+          setLoadError(error instanceof Error ? error.message : String(error));
+        }
       });
-  }, [initialState]);
+    return () => {
+      cancelled = true;
+    };
+  }, [initialState, loadError]);
 
   if (loadError) {
-    return <p className="empty">恢复会话失败：{loadError}</p>;
+    return (
+      <div className="empty load-error">
+        <p>恢复会话失败：{loadError}</p>
+        <button type="button" className="send" onClick={() => setLoadError(null)}>
+          重试
+        </button>
+      </div>
+    );
   }
   if (initialState === null) {
     return <p className="empty">正在恢复会话…</p>;

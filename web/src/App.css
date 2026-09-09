@@ -33,6 +33,17 @@ body {
   margin-top: 40vh;
 }
 
+.load-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.load-error > p {
+  margin: 0;
+}
+
 .message {
   display: flex;
 }

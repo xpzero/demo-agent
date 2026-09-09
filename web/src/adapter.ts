@@ -4,7 +4,7 @@ import type {
   ThreadMessageLike,
 } from "@assistant-ui/react";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 const SESSION_STORAGE_KEY = "demo-agent-session-id";
 
 type JsonValue =
@@ -106,7 +106,11 @@ async function loadSession(): Promise<SessionSnapshot> {
 }
 
 const getSession = (): Promise<SessionSnapshot> => {
-  sessionPromise ??= loadSession();
+  sessionPromise ??= loadSession().catch(error => {
+    // 网络或代理恢复后允许页面重新加载，不能永久缓存 rejected Promise。
+    sessionPromise = null;
+    throw error;
+  });
   return sessionPromise;
 };
 

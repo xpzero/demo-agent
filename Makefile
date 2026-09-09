@@ -26,11 +26,49 @@ init-frontend:
 	@cd web && pnpm install --frozen-lockfile
 
 dev:
-	@set -e; \
-	(cd server && uv run uvicorn api:app --reload --host 127.0.0.1 --port 8000) & backend_pid=$$!; \
-	(cd web && pnpm dev) & frontend_pid=$$!; \
-	trap 'kill "$$backend_pid" "$$frontend_pid" 2>/dev/null || true' EXIT INT TERM; \
-	wait "$$backend_pid" "$$frontend_pid"
+	@set -e; backend_pid=''; frontend_pid=''; \
+	if curl --silent --output /dev/null --max-time 1 http://127.0.0.1:8000/api/sessions; then \
+		printf '%s\n' '后端端口 8000 已有服务，请先停止重复实例'; \
+		exit 1; \
+	fi; \
+	if curl --silent --output /dev/null --max-time 1 http://127.0.0.1:5173/; then \
+		printf '%s\n' '前端端口 5173 已有服务，请先停止重复实例'; \
+		exit 1; \
+	fi; \
+	cleanup() { \
+		[ -z "$$backend_pid" ] || kill "$$backend_pid" 2>/dev/null || true; \
+		[ -z "$$frontend_pid" ] || kill "$$frontend_pid" 2>/dev/null || true; \
+		[ -z "$$backend_pid" ] || wait "$$backend_pid" 2>/dev/null || true; \
+		[ -z "$$frontend_pid" ] || wait "$$frontend_pid" 2>/dev/null || true; \
+	}; \
+	trap 'cleanup' EXIT; \
+	trap 'exit 130' INT; \
+	trap 'exit 143' TERM; \
+	(cd server && exec .venv/bin/uvicorn api:app --reload --host 127.0.0.1 --port 8000) & backend_pid=$$!; \
+	attempt=0; \
+	until curl --fail --silent --show-error http://127.0.0.1:8000/api/sessions >/dev/null 2>&1; do \
+		if ! kill -0 "$$backend_pid" 2>/dev/null; then \
+			wait "$$backend_pid"; \
+			exit $$?; \
+		fi; \
+		attempt=$$((attempt + 1)); \
+		if [ "$$attempt" -ge 50 ]; then \
+			printf '%s\n' '后端启动超时，未启动前端'; \
+			exit 1; \
+		fi; \
+		sleep 0.2; \
+	done; \
+	(cd web && exec ./node_modules/.bin/vite) & frontend_pid=$$!; \
+	while kill -0 "$$backend_pid" 2>/dev/null && kill -0 "$$frontend_pid" 2>/dev/null; do \
+		sleep 0.2; \
+	done; \
+	exit_status=0; \
+	if ! kill -0 "$$backend_pid" 2>/dev/null; then \
+		wait "$$backend_pid" || exit_status=$$?; \
+	else \
+		wait "$$frontend_pid" || exit_status=$$?; \
+	fi; \
+	exit "$$exit_status"
 
 dev-backend:
 	@cd server && uv run uvicorn api:app --reload --host 127.0.0.1 --port 8000
