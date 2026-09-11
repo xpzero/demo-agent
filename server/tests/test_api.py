@@ -10,6 +10,7 @@ from agent import approval  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from fakes import FakeSessionService  # noqa: E402
 from sessions import SessionStorageError  # noqa: E402
+from tools.files.paths import ROOT  # noqa: E402
 
 
 def pending_batch():
@@ -231,6 +232,57 @@ class ApprovalApiTests(unittest.TestCase):
         self.assertEqual(
             self.sessions.get(self.session.id).items[-1]["call_id"], "call_write"
         )
+
+
+class FileApiTests(unittest.TestCase):
+    def setUp(self):
+        self.app = api.create_app(session_service_factory=lambda: FakeSessionService())
+        self.client_context = TestClient(self.app)
+        self.client = self.client_context.__enter__()
+
+    def tearDown(self):
+        self.client_context.__exit__(None, None, None)
+
+    def test_returns_file_content_within_root(self):
+        response = self.client.get("/api/files", params={"path": "main.py"})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["path"], "main.py")
+        self.assertFalse(body["truncated"])
+        self.assertEqual(body["size"], (ROOT / "main.py").stat().st_size)
+        self.assertEqual(
+            body["content"], (ROOT / "main.py").read_text(encoding="utf-8")
+        )
+
+    def test_rejects_traversal_and_blocked_paths(self):
+        traversal = self.client.get(
+            "/api/files", params={"path": "../../etc/hosts"}
+        )
+        blocked = self.client.get("/api/files", params={"path": ".env"})
+
+        self.assertEqual(traversal.status_code, 400)
+        self.assertIn("路径越界", traversal.json()["detail"])
+        self.assertEqual(blocked.status_code, 400)
+        self.assertIn("禁止访问", blocked.json()["detail"])
+
+    def test_missing_file_is_404_and_directory_is_400(self):
+        missing = self.client.get(
+            "/api/files", params={"path": "notes/definitely-missing.txt"}
+        )
+        directory = self.client.get("/api/files", params={"path": "tools"})
+
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(directory.status_code, 400)
+
+    def test_oversized_content_is_truncated(self):
+        with patch.object(api, "MAX_FILE_CHARS", 10):
+            response = self.client.get("/api/files", params={"path": "main.py"})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["truncated"])
+        self.assertEqual(body["content"], (ROOT / "main.py").read_text()[:10])
 
 
 if __name__ == "__main__":

@@ -126,6 +126,22 @@ function isReadyToResume(batch: PendingApproval | null): boolean {
   );
 }
 
+export type ProjectFile = {
+  path: string;
+  size: number;
+  truncated: boolean;
+  content: string;
+};
+
+/** 页面查看后端项目内文件当前内容的入口，与文件工具共用同一条硬边界。 */
+export async function fetchProjectFile(path: string): Promise<ProjectFile> {
+  const response = await fetch(
+    `${API_BASE}/api/files?path=${encodeURIComponent(path)}`,
+  );
+  if (!response.ok) throw await responseError(response);
+  return response.json() as Promise<ProjectFile>;
+}
+
 export async function submitToolDecision(
   callId: string,
   approved: boolean,

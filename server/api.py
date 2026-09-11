@@ -18,6 +18,7 @@ from agent.approval import (
 )
 from logging_setup import setup_logging
 from services import ServiceContainer, create_default_services
+from tools.files.paths import ROOT, resolve
 from sessions import (
     SessionDataError,
     SessionError,
@@ -102,6 +103,10 @@ def _public_pending(batch: dict | None) -> dict | None:
     }
 
 
+# 页面文件查看入口返回的最大字符数，超长内容截断并标记 truncated
+MAX_FILE_CHARS = 64 * 1024
+
+
 def create_app(
     session_service_factory: Callable[[], SessionService] = create_default_session_service,
     agent_services: ServiceContainer | None = None,
@@ -180,6 +185,33 @@ def create_app(
             "id": session.id,
             "summary": session.summary,
             "pending_approval": _public_pending(session.pending_approval),
+        }
+
+    @app.get("/api/files")
+    def read_project_file(path: str):
+        """页面查看文件当前内容的入口。
+
+        不经过 PermissionService：权限规则约束的是模型发起的工具执行，
+        这个入口属于文件所有者本人。但它与文件工具共用 resolve() 的硬边界
+        （根目录、越界与符号链接检查、黑名单），这些限制对两边都生效。
+        """
+        try:
+            target = resolve(path)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error))
+
+        if not target.exists():
+            raise HTTPException(status_code=404, detail=f"文件不存在：{path}")
+        if not target.is_file():
+            raise HTTPException(status_code=400, detail=f"目标不是文件：{path}")
+
+        raw = target.read_bytes()
+        content = raw.decode("utf-8", errors="replace")
+        return {
+            "path": target.relative_to(ROOT).as_posix(),
+            "size": len(raw),
+            "truncated": len(content) > MAX_FILE_CHARS,
+            "content": content[:MAX_FILE_CHARS],
         }
 
     @app.post("/api/sessions/{session_id}/chat")

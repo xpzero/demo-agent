@@ -14,7 +14,7 @@ import {
   CodeDiff,
   type DiffLine,
 } from "@/components/assistant-ui/elements/code-diff.aui";
-import { submitToolDecision, type CodeDiffPreview } from "./adapter";
+import { submitToolDecision, fetchProjectFile, type CodeDiffPreview, type ProjectFile } from "./adapter";
 import { expandPreviewTools } from "./preview";
 
 const isCodeDiff = (value: unknown): value is CodeDiffPreview => {
@@ -29,9 +29,57 @@ const isCodeDiff = (value: unknown): value is CodeDiffPreview => {
   );
 };
 
+const filePathFromArgs = (args: unknown): string | null => {
+  if (!args || typeof args !== "object") return null;
+  const path = (args as { path?: unknown }).path;
+  return typeof path === "string" && path.length > 0 ? path : null;
+};
+
+/** write_file 的结果只有一行摘要；这里提供“文件现在长什么样”的页面级核对入口。 */
+function FilePeek({ path }: { path: string }) {
+  const [file, setFile] = useState<ProjectFile | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setFile(await fetchProjectFile(path));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-1 pt-2">
+      <button
+        type="button"
+        className="self-start rounded-lg border border-stone-300 px-3 py-1.5 text-xs font-medium hover:bg-stone-100 disabled:cursor-wait disabled:opacity-50 dark:border-stone-600 dark:hover:bg-stone-800"
+        disabled={loading}
+        onClick={() => void load()}
+      >
+        {loading ? "读取中…" : file ? "刷新文件内容" : "查看文件当前内容"}
+      </button>
+      {error && (
+        <p className="m-0 text-xs text-rose-700 dark:text-rose-300">{error}</p>
+      )}
+      {file && (
+        <pre className="m-0 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-stone-100 p-3 text-left text-xs leading-relaxed dark:bg-stone-800">
+          {file.content}
+          {file.truncated && "\n…（内容过长，已截断）"}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 export function ToolCallPart({
   toolCallId,
   toolName,
+  args,
   argsText,
   result,
   artifact,
@@ -51,6 +99,7 @@ export function ToolCallPart({
   const [decisionError, setDecisionError] = useState<string | null>(null);
   const [decisionOutput, setDecisionOutput] = useState<string | null>(null);
   const diff = isCodeDiff(artifact) ? artifact : null;
+  const writeTarget = toolName === "write_file" ? filePathFromArgs(args) : null;
 
   const answerApproval = async (approved: boolean) => {
     if (!respondToApproval) return;
@@ -143,6 +192,7 @@ export function ToolCallPart({
         {!isCancelled && (
           <ToolFallbackResult result={decisionOutput ?? result} />
         )}
+        {!isCancelled && writeTarget && <FilePeek path={writeTarget} />}
       </ToolFallbackContent>
     </ToolFallbackRoot>
   );
