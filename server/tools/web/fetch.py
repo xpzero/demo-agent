@@ -1,5 +1,3 @@
-from services.permission import PermissionRequest
-
 from .client import client, truncate, wrap_untrusted
 
 SCHEMA = {
@@ -18,10 +16,6 @@ SCHEMA = {
     },
     "strict": False,
 }
-
-
-def permission_requests(args: dict) -> tuple[PermissionRequest, ...]:
-    return (PermissionRequest("fetch_url", str(args.get("url", "*"))),)
 
 
 def run(args: dict) -> str:

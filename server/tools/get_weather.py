@@ -1,6 +1,3 @@
-from services.permission import PermissionRequest
-
-
 SCHEMA = {
     "type": "function",
     "name": "get_weather",
@@ -17,10 +14,6 @@ SCHEMA = {
     },
     "strict": False,
 }
-
-
-def permission_requests(args: dict) -> tuple[PermissionRequest, ...]:
-    return (PermissionRequest("get_weather", str(args.get("city", "*"))),)
 
 
 def run(args: dict) -> str:

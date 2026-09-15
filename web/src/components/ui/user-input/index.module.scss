@@ -1,0 +1,35 @@
+.user-input {
+  &-container {
+    width: 500px;
+    height: 100px;
+
+    border: 1px solid #000;
+    border-radius: 8px;
+
+    display: flex;
+    flex-direction: column;
+    padding: 8px;
+  }
+
+  &-text-area {
+    width: 100%;
+    flex: 1;
+
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+  }
+
+  &-handle-area {
+    display: flex;
+    justify-content: space-between;
+
+    &-left {
+      gap: 4px;
+    }
+
+    &-right {
+      gap: 4px;
+    }
+  }
+}

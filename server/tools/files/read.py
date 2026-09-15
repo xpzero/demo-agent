@@ -1,5 +1,3 @@
-from services.permission import PermissionRequest
-
 from .paths import ROOT, resolve
 
 SCHEMA = {
@@ -18,11 +16,6 @@ SCHEMA = {
     },
     "strict": False,
 }
-
-
-def permission_requests(args: dict) -> tuple[PermissionRequest, ...]:
-    target = resolve(args["path"])
-    return (PermissionRequest("read", target.relative_to(ROOT).as_posix()),)
 
 
 def run(args: dict) -> str:
