@@ -28,6 +28,7 @@ API_KEY=xxxxxxxx.xxxxxxxx        # 智谱开放平台 API 密钥
 BASE_URL=                        # 留空使用智谱兼容接口；可换成其他 OpenAI 兼容网关
 MODEL=glm-4.6                           # 可按平台支持的模型替换
 SYSTEM_PROMPT=你是一个有用的助手，可以调用工具来帮助用户。
+TOOL_PROFILE=local                      # 本地教学用 local；公开演示用 public
 TAVILY_API_KEY=tvly-xxx        # 仅联网搜索工具需要
 ```
 
@@ -139,6 +140,12 @@ demo-agent/
 | `write_file` | 写 server 目录内文件，自动建父目录，已存在则覆盖 |
 | `web_search` | 联网搜索，返回标题、链接、摘要 |
 | `fetch_url` | 抓取网页正文 |
+
+工具暴露由 `TOOL_PROFILE` 控制：
+
+- `local`（默认）保留全部教学工具，仅适合可信本地环境。
+- `public` 使用显式白名单，目前只向模型暴露 `get_weather` 与 `web_search`；`calculate`、`read_file`、`write_file`、`fetch_url` 同时从模型 schema 和执行分发中移除。
+- `read_file` 在敏感文件策略完善前不进入公开模式；`fetch_url` 在补齐 scheme、重定向及内网地址防护前不进入公开模式。新增公开工具必须显式加入白名单并补测试。
 
 关键函数的分工：
 
