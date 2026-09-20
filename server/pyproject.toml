@@ -8,6 +8,7 @@ dependencies = [
     "fastapi>=0.141.1",
     "openai>=2.53.0",
     "python-dotenv>=1.2.2",
+    "python-multipart>=0.0.20",
     "tavily-python>=0.7.27",
     "uvicorn>=0.52.1",
 ]
@@ -15,3 +16,7 @@ dependencies = [
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true

@@ -1,12 +1,13 @@
 import json
 from threading import Lock
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from agent import SYSTEM_PROMPT, stream_events
+from documents import DOCUMENT_ROOT, MAX_DOCUMENT_BYTES, DocumentUploadError, save_pdf
 from logging_setup import setup_logging
 
 # uvicorn 先配好自己的日志再导入本模块，放在这里设置才不会被它覆盖
@@ -34,6 +35,17 @@ class ChatRequest(BaseModel):
 
 def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+@app.post("/api/documents", status_code=201)
+async def upload_document(file: UploadFile = File(...)):
+    try:
+        return await save_pdf(file, root=DOCUMENT_ROOT, max_bytes=MAX_DOCUMENT_BYTES)
+    except DocumentUploadError as error:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail={"code": error.code, "message": str(error)},
+        ) from error
 
 
 @app.post("/api/chat")
