@@ -163,7 +163,7 @@ demo-agent/
 - **工具结果必须带原始 `tool_call_id`**：`role="tool"` 消息没有正确关联调用时，下一次请求会直接失败
 - **工具输出统一成字符串**：`eval()` 可能返回 `int`，而当前工具事件都按字符串处理，所以 `calculate` 的返回值要 `str()` 包一层
 
-## PDF 上传（文档研究助手第一阶段）
+## PDF 上传
 
 聊天输入框左下角的回形针用于选择单份 PDF；前端会先检查类型、空文件和 10 MiB 上限，选择后自动请求 `POST /api/documents`。服务端用 `python-multipart` 接收文件，再检查扩展名、声明的 MIME、`%PDF-` 文件头与实际读取的大小。成功返回 `document_id`、文件名、大小以及 `uploaded` 状态。文件和元数据存放于被 Git 忽略的 `server/.data/documents/<document_id>/`，不用用户文件名决定磁盘路径；校验失败会清理本次临时文件。
 
