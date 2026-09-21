@@ -9,6 +9,7 @@ export type DocumentUploadState =
   | { status: "idle" }
   | { status: "invalid"; file: File; message: string }
   | { status: "uploading"; file: File }
+  | { status: "cancelling"; file: File }
   | { status: "uploaded"; file: File; document: UploadedDocument }
   | { status: "failed"; file: File; message: string };
 
@@ -33,7 +34,13 @@ export function useDocumentUpload() {
   const controllerRef = useRef<AbortController | null>(null);
 
   const reset = () => {
-    controllerRef.current?.abort();
+    const controller = controllerRef.current;
+    if (controller && state.status === "uploading") {
+      controller.abort();
+      setState({ status: "cancelling", file: state.file });
+      return;
+    }
+
     controllerRef.current = null;
     setState({ status: "idle" });
   };
@@ -52,16 +59,24 @@ export function useDocumentUpload() {
     setState({ status: "uploading", file });
     try {
       const document = await uploadDocument(file, controller.signal);
-      if (controllerRef.current === controller) {
-        controllerRef.current = null;
-        setState({ status: "uploaded", file, document });
+      if (controllerRef.current !== controller) {
+        return;
       }
+      controllerRef.current = null;
+      if (controller.signal.aborted) {
+        setState({ status: "idle" });
+        return;
+      }
+      setState({ status: "uploaded", file, document });
     } catch (error) {
       if (controllerRef.current !== controller) {
         return;
       }
       controllerRef.current = null;
-      if (error instanceof DOMException && error.name === "AbortError") {
+      if (
+        controller.signal.aborted ||
+        (error instanceof DOMException && error.name === "AbortError")
+      ) {
         setState({ status: "idle" });
         return;
       }
@@ -73,7 +88,14 @@ export function useDocumentUpload() {
     }
   };
 
-  useEffect(() => () => controllerRef.current?.abort(), []);
+  useEffect(
+    () => () => {
+      const controller = controllerRef.current;
+      controllerRef.current = null;
+      controller?.abort();
+    },
+    [],
+  );
 
   return { state, selectFile, reset };
 }

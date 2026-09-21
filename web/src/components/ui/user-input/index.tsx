@@ -95,7 +95,10 @@ export default function UserInput({ onSend, running }: UserInputProps) {
             size="icon-sm"
             aria-label="上传 PDF"
             title="上传 PDF"
-            disabled={uploadState.status === "uploading"}
+            disabled={
+              uploadState.status === "uploading" ||
+              uploadState.status === "cancelling"
+            }
             onClick={() => fileInputRef.current?.click()}
           >
             <Paperclip />

@@ -35,6 +35,9 @@ function getDescription(state: VisibleDocumentUploadState) {
   if (state.status === "uploading") {
     return `正在上传 · ${formatBytes(state.file.size)}`;
   }
+  if (state.status === "cancelling") {
+    return "正在取消上传";
+  }
   return `已上传，等待解析 · ${formatBytes(state.document.size)}`;
 }
 
@@ -43,7 +46,7 @@ export default function DocumentAttachment({
   onRemove,
 }: DocumentAttachmentProps) {
   const attachmentState =
-    state.status === "uploading"
+    state.status === "uploading" || state.status === "cancelling"
       ? "uploading"
       : state.status === "invalid" || state.status === "failed"
         ? "error"
@@ -57,7 +60,7 @@ export default function DocumentAttachment({
         className={styles.documentAttachment}
       >
         <AttachmentMedia>
-          {state.status === "uploading" ? (
+          {state.status === "uploading" || state.status === "cancelling" ? (
             <LoaderCircle className="animate-spin" />
           ) : (
             <FileText />
@@ -71,6 +74,7 @@ export default function DocumentAttachment({
           <AttachmentAction
             type="button"
             aria-label="从输入框移除附件（已上传文件仍保存在服务端）"
+            disabled={state.status === "cancelling"}
             onClick={onRemove}
           >
             <X />
