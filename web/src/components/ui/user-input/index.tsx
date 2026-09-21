@@ -1,6 +1,9 @@
 import { useEffect, useRef } from "react";
-import type { FormEvent, KeyboardEvent } from "react";
+import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
+import { Paperclip } from "lucide-react";
 import { useUserInputStore } from "@/stores/user";
+import { useDocumentUpload } from "@/hooks/useDocumentUpload";
+import DocumentAttachment from "@/components/ui/document-attachment";
 import styles from "./index.module.scss";
 import { Button } from "@/components/shadcn/button";
 
@@ -13,9 +16,12 @@ interface UserInputProps {
 
 export default function UserInput({ onSend, running }: UserInputProps) {
   const ref = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const text = useUserInputStore((state) => state.text);
   const setText = useUserInputStore((state) => state.setText);
   const clear = useUserInputStore((state) => state.clear);
+  const documentUpload = useDocumentUpload();
+  const { state: uploadState } = documentUpload;
 
   // 用户打字时，把 DOM 内容同步进 store
   const handleInput = (event: FormEvent<HTMLDivElement>) => {
@@ -39,6 +45,15 @@ export default function UserInput({ onSend, running }: UserInputProps) {
     }
   };
 
+  const onFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    // 清空 input 后，同一文件也可以再次选择并触发 change。
+    event.target.value = "";
+    if (file) {
+      void documentUpload.selectFile(file);
+    }
+  };
+
   // 外部（store）修改 text 时写回 DOM；一致时跳过，避免打字时光标跳动
   useEffect(() => {
     const el = ref.current;
@@ -57,8 +72,38 @@ export default function UserInput({ onSend, running }: UserInputProps) {
         onKeyDown={onEnter}
         suppressContentEditableWarning
       />
+
+      {uploadState.status !== "idle" && (
+        <DocumentAttachment
+          state={uploadState}
+          onRemove={documentUpload.reset}
+        />
+      )}
+
       <div className={styles.userInputHandleArea}>
-        <div className={styles.userInputHandleAreaLeft}></div>
+        <div className={styles.userInputHandleAreaLeft}>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,application/pdf"
+            hidden
+            onChange={onFileChange}
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="上传 PDF"
+            title="上传 PDF"
+            disabled={
+              uploadState.status === "uploading" ||
+              uploadState.status === "cancelling"
+            }
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Paperclip />
+          </Button>
+        </div>
         <div className={styles.userInputHandleAreaRight}>
           <Button onClick={submit} disabled={running}>
             发送

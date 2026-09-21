@@ -3,8 +3,13 @@ import type { AgentEvent } from "./types";
 export const API_BASE = "http://localhost:8000";
 
 export async function responseError(response: Response): Promise<Error> {
-  const data = (await response.json().catch(() => null)) as { detail?: string } | null;
-  return new Error(data?.detail ?? `请求失败：${response.status}`);
+  const data = (await response.json().catch(() => null)) as {
+    detail?: string | { message?: string };
+  } | null;
+  const detail = data?.detail;
+  const message =
+    typeof detail === "string" ? detail : detail?.message;
+  return new Error(message ?? `请求失败：${response.status}`);
 }
 
 /** 逐行解析 SSE：chunk 可能含多条或半条消息，按空行分帧。 */

@@ -1,18 +1,20 @@
 .user-input {
   &-container {
-    width: 500px;
-    height: 100px;
+    width: min(500px, calc(100vw - 32px));
+    min-height: 100px;
 
     border: 1px solid #000;
     border-radius: 8px;
 
     display: flex;
     flex-direction: column;
+    gap: 6px;
     padding: 8px;
   }
 
   &-text-area {
     width: 100%;
+    min-height: 56px;
     flex: 1;
 
     border: none !important;
@@ -22,13 +24,13 @@
 
   &-handle-area {
     display: flex;
+    align-items: center;
     justify-content: space-between;
 
-    &-left {
-      gap: 4px;
-    }
-
+    &-left,
     &-right {
+      display: flex;
+      align-items: center;
       gap: 4px;
     }
   }
