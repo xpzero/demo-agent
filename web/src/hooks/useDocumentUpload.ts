@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   MAX_PDF_BYTES,
   uploadDocument,
@@ -32,13 +32,13 @@ export function useDocumentUpload() {
   const [state, setState] = useState<DocumentUploadState>({ status: "idle" });
   const controllerRef = useRef<AbortController | null>(null);
 
-  const reset = useCallback(() => {
+  const reset = () => {
     controllerRef.current?.abort();
     controllerRef.current = null;
     setState({ status: "idle" });
-  }, []);
+  };
 
-  const selectFile = useCallback(async (file: File) => {
+  const selectFile = async (file: File) => {
     controllerRef.current?.abort();
     const validationMessage = validatePdf(file);
     if (validationMessage) {
@@ -71,7 +71,7 @@ export function useDocumentUpload() {
         message: error instanceof Error ? error.message : "上传失败",
       });
     }
-  }, []);
+  };
 
   useEffect(() => () => controllerRef.current?.abort(), []);
 
