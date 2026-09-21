@@ -1,32 +1,17 @@
 import { useEffect, useRef } from "react";
 import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
-import { FileText, LoaderCircle, Paperclip, X } from "lucide-react";
+import { Paperclip } from "lucide-react";
 import { useUserInputStore } from "@/stores/user";
 import { useDocumentUpload } from "@/hooks/useDocumentUpload";
+import DocumentAttachment from "@/components/ui/document-attachment";
 import styles from "./index.module.scss";
 import { Button } from "@/components/shadcn/button";
-import {
-  Attachment,
-  AttachmentAction,
-  AttachmentActions,
-  AttachmentContent,
-  AttachmentDescription,
-  AttachmentMedia,
-  AttachmentTitle,
-} from "@/components/shadcn/attachment";
 
 interface UserInputProps {
   /** 发送一条消息 */
   onSend: (text: string) => void;
   /** 是否有请求正在运行 */
   running: boolean;
-}
-
-function formatBytes(bytes: number) {
-  if (bytes < 1024 * 1024) {
-    return `${Math.max(1, Math.round(bytes / 1024))} KiB`;
-  }
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 export default function UserInput({ onSend, running }: UserInputProps) {
@@ -77,26 +62,6 @@ export default function UserInput({ onSend, running }: UserInputProps) {
     }
   }, [text]);
 
-  const attachmentState =
-    uploadState.status === "uploading"
-      ? "uploading"
-      : uploadState.status === "invalid" || uploadState.status === "failed"
-        ? "error"
-        : "done";
-
-  const attachmentDescription = (() => {
-    if (uploadState.status === "invalid" || uploadState.status === "failed") {
-      return uploadState.message;
-    }
-    if (uploadState.status === "uploading") {
-      return `正在上传 · ${formatBytes(uploadState.file.size)}`;
-    }
-    if (uploadState.status === "uploaded") {
-      return `已上传，等待解析 · ${formatBytes(uploadState.document.size)}`;
-    }
-    return "";
-  })();
-
   return (
     <div className={styles.userInputContainer}>
       <div
@@ -109,37 +74,10 @@ export default function UserInput({ onSend, running }: UserInputProps) {
       />
 
       {uploadState.status !== "idle" && (
-        <Attachment
-          state={attachmentState}
-          size="xs"
-          className={styles.userInputAttachment}
-        >
-          <AttachmentMedia>
-            {uploadState.status === "uploading" ? (
-              <LoaderCircle className="animate-spin" />
-            ) : (
-              <FileText />
-            )}
-          </AttachmentMedia>
-          <AttachmentContent>
-            <AttachmentTitle>{uploadState.file.name}</AttachmentTitle>
-            <AttachmentDescription>{attachmentDescription}</AttachmentDescription>
-          </AttachmentContent>
-          <AttachmentActions>
-            <AttachmentAction
-              type="button"
-              aria-label="从输入框移除附件（已上传文件仍保存在服务端）"
-              onClick={documentUpload.reset}
-            >
-              <X />
-            </AttachmentAction>
-          </AttachmentActions>
-        </Attachment>
-      )}
-      {uploadState.status === "uploaded" && (
-        <p className={styles.userInputNotice}>
-          当前只完成上传，尚未解析；发送消息仍是普通聊天，不会读取此文档。
-        </p>
+        <DocumentAttachment
+          state={uploadState}
+          onRemove={documentUpload.reset}
+        />
       )}
 
       <div className={styles.userInputHandleArea}>

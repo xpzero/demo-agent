@@ -1,0 +1,17 @@
+.document-attachment {
+  max-width: 100%;
+  padding: 4px;
+
+  &-container {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  &-notice {
+    margin: 0;
+    color: #61736e;
+    font-size: 12px;
+  }
+}
