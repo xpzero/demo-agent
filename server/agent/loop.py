@@ -3,6 +3,7 @@ import time
 from collections.abc import Iterator
 
 from tools import TOOLS, execute_tool
+from tools.context import SessionContext
 
 from .client import MODEL, client
 
@@ -108,7 +109,10 @@ def _build_assistant_message(text: str, tool_calls: list[dict]) -> dict:
 
 
 def _run_tool_calls(
-    tool_calls_with_args: list[tuple[dict, dict]], items: list, deadline: float
+    tool_calls_with_args: list[tuple[dict, dict]],
+    items: list,
+    deadline: float,
+    context: SessionContext | None,
 ) -> Iterator[dict]:
     """按模型给出的顺序逐个执行：结果写回 items，tool_call_id 原样复用。"""
     for tool_call, args in tool_calls_with_args:
@@ -119,7 +123,7 @@ def _run_tool_calls(
             "name": tool_call["name"],
             "args": args,
         }
-        tool_output = execute_tool(tool_call["name"], args)
+        tool_output = execute_tool(tool_call["name"], args, context)
         _check_deadline(deadline)
         items.append(
             {
@@ -135,10 +139,14 @@ def _run_tool_calls(
         }
 
 
-def stream_events(items: list, max_turns: int = 10) -> Iterator[dict]:
+def stream_events(
+    items: list, max_turns: int = 10, context: SessionContext | None = None
+) -> Iterator[dict]:
     """agent loop 的核心：流式请求模型、执行工具，把过程产出为结构化事件。
 
     items 是 Chat Completions 的 messages 列表，会被原地追加。
+    context 携带本轮会话信息，供 parse_attached_document 这类
+    需要定位会话附件的工具使用，与事件流本身无关。
     不做任何打印——HTTP 服务是事件流的消费方，这里只负责「发生了什么」，
     怎么呈现由调用方决定。
     """
@@ -175,7 +183,7 @@ def stream_events(items: list, max_turns: int = 10) -> Iterator[dict]:
             items.append(
                 _build_assistant_message("".join(text_parts), tool_calls)
             )
-            yield from _run_tool_calls(tool_calls_with_args, items, deadline)
+            yield from _run_tool_calls(tool_calls_with_args, items, deadline, context)
 
         yield {"type": "max_turns"}
     except Exception as error:

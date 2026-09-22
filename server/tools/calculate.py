@@ -16,5 +16,5 @@ SCHEMA = {
 }
 
 
-def run(args: dict) -> str:
+def run(args: dict, context=None) -> str:
     return str(eval(args["expression"]))

@@ -144,19 +144,20 @@ demo-agent/
 | `write_file` | 写 server 目录内文件，自动建父目录，已存在则覆盖 |
 | `web_search` | 联网搜索，返回标题、链接、摘要 |
 | `fetch_url` | 抓取网页正文 |
+| `parse_attached_document` | 解析当前会话的 PDF 附件，按页提取文本存入 pages.json |
 
 工具暴露由 `TOOL_PROFILE` 控制：
 
 - `local`（默认）保留全部教学工具，仅适合可信本地环境。
-- `public` 使用显式白名单，目前只向模型暴露 `get_weather` 与 `web_search`；`calculate`、`read_file`、`write_file`、`fetch_url` 同时从模型 schema 和执行分发中移除。
+- `public` 使用显式白名单，目前只向模型暴露 `get_weather` 与 `web_search`；`calculate`、`read_file`、`write_file`、`fetch_url`、`parse_attached_document` 同时从模型 schema 和执行分发中移除。
 - `read_file` 在敏感文件策略完善前不进入公开模式；`fetch_url` 在补齐 scheme、重定向及内网地址防护前不进入公开模式。新增公开工具必须显式加入白名单并补测试。
 
 关键函数的分工：
 
 | 函数 | 职责 |
 |---|---|
-| `stream_events(items, max_turns)` | 请求 Chat Completions 接口，逐个执行模型发起的工具调用并产出事件 |
-| `execute_tool(name, args)` | 按名称执行一个本地工具，把工具异常转成可回灌的文本结果 |
+| `stream_events(items, max_turns, context)` | 请求 Chat Completions 接口，逐个执行模型发起的工具调用并产出事件；`context` 携带本轮会话信息供工具使用 |
+| `execute_tool(name, args, context)` | 按名称执行一个本地工具，把工具异常转成可回灌的文本结果 |
 
 `stream_events` 是唯一的 Agent 内核。它把智谱（OpenAI 兼容协议）的流式 chunk 翻译成项目自己的 `text_delta`、`tool_call`、`tool_result`、`done`、`max_turns` 与 `error`；FastAPI 层把同一事件编码成 SSE。这样前端不用理解模型的完整流式协议，后端内部也不掺杂打印或页面逻辑。
 

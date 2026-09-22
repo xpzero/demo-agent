@@ -18,5 +18,5 @@ SCHEMA = {
 }
 
 
-def run(args: dict) -> str:
+def run(args: dict, context=None) -> str:
     return resolve(args["path"]).read_text(encoding="utf-8")

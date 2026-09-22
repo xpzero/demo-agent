@@ -15,6 +15,7 @@ from documents import FILE_ROOT as DEFAULT_FILE_ROOT
 from documents import MAX_FILE_BYTES, FileUploadError, save_pdf
 from documents.cleanup import cleanup_files
 from logging_setup import setup_logging
+from tools.context import SessionContext
 
 setup_logging()
 
@@ -51,6 +52,14 @@ class ChatRequest(BaseModel):
     parent_message_id: int | None = None
     message: str = Field(min_length=1, max_length=20_000)
     ref_file_ids: list[str] = Field(default_factory=list, max_length=1)
+
+
+# 会话带有 PDF 附件时追加到系统提示的规则：引导模型先解析再回答，
+# 而不是凭空猜测文档内容
+ATTACHED_DOCUMENT_RULE = (
+    "本会话带有 PDF 附件。回答与文档内容相关的问题前，"
+    "必须先调用 parse_attached_document 工具解析文档，再基于解析结果回答。"
+)
 
 
 def _sse(event: dict) -> str:
@@ -127,6 +136,9 @@ def chat(body: ChatRequest):
         raise
 
     items = [{"role": "system", "content": SYSTEM_PROMPT}]
+    session_files = database.list_session_files(session_id)
+    if session_files:
+        items[0]["content"] = f"{SYSTEM_PROMPT}\n{ATTACHED_DOCUMENT_RULE}"
     items.extend(
         {"role": message["role"], "content": message["content"]}
         for message in chain
@@ -137,10 +149,13 @@ def chat(body: ChatRequest):
             _running_sessions.discard(session_id)
 
     def sse():
+        context = SessionContext(
+            session_id=session_id, database=database, file_root=FILE_ROOT
+        )
         try:
             yield _sse({"type": "user_message", "message_id": user_message_id})
             terminated = False
-            for event in stream_events(items):
+            for event in stream_events(items, context=context):
                 if event["type"] == "done":
                     content = event["content"]
                     message_id = user_message_id

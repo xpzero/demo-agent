@@ -65,7 +65,7 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 ## 模型协议与 Agent loop 不变量
 
 - 生产代码使用 `client.chat.completions.create(...)`（OpenAI 兼容协议，默认指向智谱 `https://open.bigmodel.cn/api/paas/v4`）。不要改回 Responses API 的 `input` / `function_call` Item 协议，除非任务明确要求迁移设计。
-- `server/agent/loop.py::stream_events(items, max_turns)` 是唯一 Agent 内核。`items` 是 Chat Completions messages 列表；它产出结构化项目事件，并原地追加 `items`；API 的上下文就是这份列表。
+- `server/agent/loop.py::stream_events(items, max_turns, context)` 是唯一 Agent 内核。`items` 是 Chat Completions messages 列表；它产出结构化项目事件，并原地追加 `items`；API 的上下文就是这份列表。`context` 携带本轮会话信息（`tools/context.py::SessionContext`），供 `parse_attached_document` 这类需要定位会话附件的工具使用，不进入事件流。
 - 每次模型请求保留 `stream=True`。每轮由 SQLite 的父消息链构造临时 `items`；Agent loop 不直接读写数据库。
 - 流中只把 `delta.content` 映射为文本增量；`delta.reasoning_content`（GLM 深度思考）不属于用户可见文本，跳过不展示、不持久化。
 - 流式工具参数必须按 `index` 把 `delta.tool_calls` 的增量聚齐后再解析。非法 JSON 属于编排错误，应成为 `error` 事件，且不能把 assistant tool_calls 消息留在历史里（只有调用、没有结果的半截历史）。
@@ -107,7 +107,7 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 
 ## 工具约定与安全边界
 
-当前工具是 `calculate`、`get_weather`、`read_file`、`write_file`、`web_search` 和 `fetch_url`。新增或修改工具时：
+当前工具是 `calculate`、`get_weather`、`parse_attached_document`、`read_file`、`write_file`、`web_search` 和 `fetch_url`。新增或修改工具时：
 
 - 每个工具模块导出扁平 function schema `SCHEMA`（`type`、`name`、`description`、`parameters`、`strict` 同层）和 `run(args)`；Chat Completions 的 `function` 外壳由 `loop.py` 在请求时统一添加，不要写进各工具的 `SCHEMA`。
 - 在所属子包的 `MODULES` 中登记工具；根 `server/tools/__init__.py` 从模块生成 Schema 与处理器，不要再维护一份手写名称映射。
