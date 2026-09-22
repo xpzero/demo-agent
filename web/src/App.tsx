@@ -19,7 +19,7 @@ export default function App() {
 
   return (
     <TooltipProvider>
-      <SidebarProvider>
+      <SidebarProvider className="h-svh">
         <AppSidebar />
         <SidebarInset>
           <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
@@ -27,7 +27,7 @@ export default function App() {
             <h1 className="text-sm font-semibold">Agent Demo</h1>
           </header>
 
-          <main className="flex flex-1 flex-col items-center gap-4 py-8">
+          <main className="flex min-h-0 flex-1 flex-col items-center gap-4 py-8">
             <ChatMessages entries={entries} />
             {error && <p className="text-sm text-red-500">{error}</p>}
 

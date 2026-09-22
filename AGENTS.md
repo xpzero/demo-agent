@@ -56,7 +56,7 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 
 - `server/agent/`：智谱（OpenAI 兼容）客户端配置与唯一 Agent 内核。
 - `server/tools/`：工具 schema、实现、注册和执行分发。
-- `server/api.py`：单会话上下文、FastAPI 路由、CORS 和项目事件到 SSE 的传输映射。
+- `server/api.py`：FastAPI 路由、进程内会话运行保护、CORS 和项目事件到 SSE 的传输映射；`server/database/` 持久化 Session/Message/File。
 - `web/src/adapter/`：HTTP 请求、SSE 分帧与项目事件类型定义，不依赖任何 UI 框架。`types.ts` 是事件类型，`transport.ts` 是 API 地址、请求错误与 SSE 分帧，`index.ts` 是聊天请求与公共导出。
 - `web/src/App.tsx`：界面组合层；当前为重写占位，展示逻辑与 `adapter/` 保持分离。
 
@@ -66,7 +66,7 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 
 - 生产代码使用 `client.chat.completions.create(...)`（OpenAI 兼容协议，默认指向智谱 `https://open.bigmodel.cn/api/paas/v4`）。不要改回 Responses API 的 `input` / `function_call` Item 协议，除非任务明确要求迁移设计。
 - `server/agent/loop.py::stream_events(items, max_turns)` 是唯一 Agent 内核。`items` 是 Chat Completions messages 列表；它产出结构化项目事件，并原地追加 `items`；API 的上下文就是这份列表。
-- 每次模型请求保留 `stream=True`。不要引入服务端会话存储；上下文始终来自本地 `items` 重放。
+- 每次模型请求保留 `stream=True`。每轮由 SQLite 的父消息链构造临时 `items`；Agent loop 不直接读写数据库。
 - 流中只把 `delta.content` 映射为文本增量；`delta.reasoning_content`（GLM 深度思考）不属于用户可见文本，跳过不展示、不持久化。
 - 流式工具参数必须按 `index` 把 `delta.tool_calls` 的增量聚齐后再解析。非法 JSON 属于编排错误，应成为 `error` 事件，且不能把 assistant tool_calls 消息留在历史里（只有调用、没有结果的半截历史）。
 - 一条 assistant 消息携带本轮全部工具调用，整体追加到上下文；不能只保留文本或部分调用。
@@ -77,12 +77,13 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 
 ## 项目事件、SSE 与前端映射
 
-稳定项目事件及字段为：
+稳定 SSE 事件及字段为：
 
+- `user_message`：`message_id`（API 持久化用户消息后追加）
 - `text_delta`：`text`
 - `tool_call`：`id`、`name`、`args`
 - `tool_result`：`id`、`content`
-- `done`：`content`
+- `done`：`content`、`message_id`（API 持久化助手消息后追加）
 - `max_turns`
 - `error`：`message`
 
@@ -125,10 +126,10 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 
 ## 会话格式与并发
 
-- 全项目只有一份会话上下文：`api.py` 里的 `items` 列表，以 system message 开始。
-- 上下文全部是普通字典；只存在进程内存，不做磁盘持久化，后端重启即全部清空。
-- 正常完成时 `items` 里 function call 与 output 配对完整。任何修改都必须考虑错误和客户端取消路径。
-- `api.py` 用进程内标志与锁阻止并发 chat；进程内锁不解决多 worker 或多进程竞争，不要把当前实现描述为跨进程并发安全。
+- Session、最终用户/助手消息、上传文件与消息附件关系持久化于 SQLite；Chat 根据父消息链临时构造以 system message 开始的 `items`。
+- 工具调用和工具结果仍只属于本轮临时 `items`，尚未落库；不得把它们拆成只有调用、没有结果的半截上下文。
+- `user_message` SSE 先返回已持久化用户消息 ID；`done` 携带助手消息 ID。错误或客户端取消后用户消息可能保留，下一轮应以该 ID 为父节点。
+- `api.py` 用进程内集合与锁阻止同一 Session 并发 Chat；进程内锁不解决多 worker 或多进程竞争，不要描述为跨进程安全。
 
 ## 编码、依赖与文档
 
@@ -137,7 +138,7 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 - 用户可见文本和主要说明使用中文；新增提示、错误和文档保持一致。
 - 后端依赖变化同时更新 `server/pyproject.toml` 和 `server/uv.lock`；前端依赖变化同时更新 `web/package.json` 和 `web/pnpm-lock.yaml`。
 - 前端的 `@/*` alias 必须在 TypeScript 与 Vite 配置中保持一致。界面重写时保持展示逻辑与 `adapter/` 的传输职责分离。
-- 浏览器不保存任何会话状态；刷新即回到空聊天记录，历史只存在于后端进程内存中。
+- 浏览器页内持有当前 Session ID 与父消息 ID，刷新后默认新建空会话；历史可通过 `GET /api/sessions` 和 `GET /api/sessions/{id}` 从 SQLite 查询。
 - README 描述当前结构与用法。重构时更新“当前结构”和“已知问题”。
 
 ## 验证矩阵

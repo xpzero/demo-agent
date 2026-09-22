@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
-import { streamChat, type AgentEvent } from "@/adapter";
+import { getSessionHistory, streamChat, type AgentEvent } from "@/adapter";
+import { useSessionStore } from "@/stores/session";
 
 /** 一条聊天记录：用户输入原文，或助手回合的原始事件流。 */
 export type ChatEntry =
@@ -15,8 +16,12 @@ export function useChat() {
   const [error, setError] = useState("");
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const runningRef = useRef(false);
+  const recoveryNeededRef = useRef(false);
+  const setCurrentMessageId = useSessionStore(
+    (state) => state.setCurrentMessageId,
+  );
 
-  const send = async (message: string) => {
+  const send = async (message: string, refFileIds: string[] = []) => {
     if (runningRef.current) {
       return;
     }
@@ -29,8 +34,21 @@ export function useChat() {
       { kind: "assistant", id: crypto.randomUUID(), events: [] },
     ]);
     try {
-      for await (const event of await streamChat(message)) {
-        console.log("dev: event", event);
+      const { sessionId } = useSessionStore.getState();
+      if (recoveryNeededRef.current) {
+        const history = await getSessionHistory(sessionId);
+        if (history?.session.current_message_id != null) {
+          setCurrentMessageId(history.session.current_message_id);
+        }
+        recoveryNeededRef.current = false;
+      }
+      const parentMessageId = useSessionStore.getState().currentMessageId;
+      for await (const event of await streamChat({
+        session_id: sessionId,
+        parent_message_id: parentMessageId,
+        message,
+        ref_file_ids: refFileIds,
+      })) {
         setEntries((prev) => {
           const next = [...prev];
           const last = next[next.length - 1];
@@ -45,9 +63,29 @@ export function useChat() {
         if (event.type === "error") {
           setError(event.message);
         }
+        if (event.type === "user_message" || event.type === "done") {
+          setCurrentMessageId(event.message_id);
+          recoveryNeededRef.current = false;
+        }
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+      // 请求可能已在后端创建用户消息，但 SSE 首帧未抵达浏览器；
+      // 标记待恢复，下次发送前用历史接口对齐父消息指针。
+      recoveryNeededRef.current = true;
+      // 失败也要在气泡里留下可见痕迹，不能永远停在「思考中」。
+      setEntries((prev) => {
+        const next = [...prev];
+        const last = next[next.length - 1];
+        if (last && last.kind === "assistant") {
+          next[next.length - 1] = {
+            ...last,
+            events: [...last.events, { type: "error", message }],
+          };
+        }
+        return next;
+      });
     } finally {
       runningRef.current = false;
       setRunning(false);
