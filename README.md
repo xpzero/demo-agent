@@ -114,7 +114,9 @@ ReAct 强制模型每步先写出推理再行动，本项目没有这个要求�
 ```
 demo-agent/
 ├── server/                  # 后端：Agent 本体（Python / uv）
-│   ├── api.py               # FastAPI、单会话上下文与 SSE 输出
+│   ├── api.py               # FastAPI 路由、会话并发保护与 SSE 输出
+│   ├── database/            # SQLite schema 与 Session/Message/File 数据访问
+│   ├── documents/           # PDF 隔离存储与文件生命周期清理
 │   ├── agent/               # 模型交互
 │   │   ├── client.py        # 智谱（OpenAI 兼容）客户端、MODEL、SYSTEM_PROMPT
 │   │   └── loop.py          # Chat Completions 流式 agent loop，产出项目内事件
@@ -124,11 +126,13 @@ demo-agent/
 │   │   ├── files/           # 文件类（paths.py 做路径校验）
 │   │   └── web/             # 联网类（client.py 含截断与不可信标注）
 │   └── .env                 # API key 与 base url
-└── web/                     # Vite + React 前端（UI 重写中，暂无界面框架）
-    └── src/adapter/         # 调后端、解析 SSE、还原项目事件（types/transport/index）
+└── web/                     # Vite + React 前端（UI 重写中）
+    └── src/
+        ├── adapter/         # 调后端、解析 SSE、还原项目事件
+        └── stores/          # 页内输入状态与当前 Session 指针
 ```
 
-文件工具的根目录限定在 `server/` 内——Agent 读写不到 `web/` 与仓库根，`.env`、`.git` 与 `.sessions` 也禁止访问。全项目只有一份会话上下文：`api.py` 里的 `items` 列表，只存在进程内存中，后端重启即全部清空。
+文件工具的根目录限定在 `server/` 内——Agent 读写不到 `web/` 与仓库根，`.env`、`.git` 与 `.sessions` 也禁止访问。会话、最终用户/助手消息、上传文件信息和消息—文件关系存于 `server/.data/demo-agent.sqlite3`；每轮 Chat 根据 `session_id` 与 `parent_message_id` 从 SQLite 还原当前消息链，再临时投影成 Chat Completions `items`。工具调用与工具结果暂不持久化。
 
 现有工具：
 
@@ -163,13 +167,15 @@ demo-agent/
 - **工具结果必须带原始 `tool_call_id`**：`role="tool"` 消息没有正确关联调用时，下一次请求会直接失败
 - **工具输出统一成字符串**：`eval()` 可能返回 `int`，而当前工具事件都按字符串处理，所以 `calculate` 的返回值要 `str()` 包一层
 
-## PDF 上传
+## Session、消息与 PDF 上传
 
-聊天输入框左下角的回形针用于选择单份 PDF；前端会先检查类型、空文件和 10 MiB 上限，选择后自动请求 `POST /api/documents`。服务端用 `python-multipart` 接收文件，再检查扩展名、声明的 MIME、`%PDF-` 文件头与实际读取的大小。成功返回 `document_id`、文件名、大小以及 `uploaded` 状态。文件和元数据存放于被 Git 忽略的 `server/.data/documents/<document_id>/`，不用用户文件名决定磁盘路径；校验失败会清理本次临时文件。
+前端用 `crypto.randomUUID()` 生成 `session_id`，不单独创建空会话。第一次 `POST /api/chat` 携带 `parent_message_id: null` 时，后端在同一事务中创建 Session、用户消息及附件关系；后续请求携带上一轮 SSE 返回的消息 ID。`GET /api/sessions` 返回历史摘要，`GET /api/sessions/{session_id}` 返回消息及其附件。`user_message` 事件会在模型执行前返回已持久化的用户消息 ID，因此模型失败后仍可从该节点继续；`done` 事件返回助手消息 ID。
 
-`uploaded` **仅表示保存成功**：当前尚无解析、检索、引用或文档问答；普通聊天不会读取上传的文件。输入框的“移除附件”仅取消正在进行的请求或移除本地展示，**不会删除已经保存在服务端的文件**。本地测试数据需要按实际使用情况管理，尚无自动过期清理或删除接口。取消请求与服务端写入之间可能存在竞态，不能据此保证文件未保存。
+聊天输入框左下角的回形针用于选择单份 PDF，Tooltip 会说明只支持 PDF 和 10 MiB 上限。前端先检查类型、空文件与大小，选择后自动请求 `POST /api/documents`；服务端再次检查扩展名、MIME、`%PDF-` 文件头与实际读取大小。成功返回 `file_id`，原文件保存到 `server/.data/files/<file_id>/original.pdf`，上传元数据只存 SQLite，不再创建 `metadata.json`。Chat 请求通过 `ref_file_ids` 将附件绑定到具体用户消息，MVP 最多一项。
 
-这是可信本地演示的第一阶段，不能直接公开部署。应用在读取 `UploadFile` 前，multipart 处理可能已经占用临时空间；公网入口仍需要请求体上限、身份权限、配额及文件生命周期管理。`%PDF-` 文件头只做初筛，不代表 PDF 结构有效或安全；按页解析和扫描件识别留待后续阶段。
+`uploaded` **仅表示保存成功**：当前尚无解析、检索、引用或基于附件的回答。输入框移除只取消客户端请求或移除草稿引用，不会立即删除已保存文件。启动时以及 `uv run python -m documents.cleanup` 会清理超过 1 小时的临时文件、超过 24 小时且从未被消息引用的文件，以及超过 24 小时且 SQLite 无记录的孤立目录；已被消息引用的文件不会按此规则回收。
+
+这是可信本地演示，不能直接公开部署。应用读取 `UploadFile` 前，multipart 处理可能已占用临时空间；公网入口仍需要网关请求体上限、用户身份、配额和更完整的文件生命周期。`%PDF-` 文件头只是初筛，不代表 PDF 结构有效或安全。
 
 ## 已知问题
 
@@ -184,13 +190,13 @@ demo-agent/
 
 ### 1. 上下文控制
 
-当前每轮都会重放整份 `items`。后续需要在接近模型上下文上限前做截断、摘要或 compaction，同时保留尚未配对的 tool call、关键事实与必要的上下文。
+当前每轮都会重放所选父消息链的用户/助手最终文本。后续需要在接近模型上下文上限前做截断、摘要或 compaction；工具调用和工具结果是否作为 Fragment 持久化仍待设计。
 
 ### 2. 并发与会话存储
 
-- 把当前进程内运行保护扩展成完整的会话所有权与并发模型，并处理多 worker / 多进程竞争
-- 需要跨重启保留会话时，为内存会话补落盘或迁到 SQLite 等带并发控制的存储
-- 为流中断设计事务边界，避免把尚未完成的调用链落成半截上下文
+- SQLite 已保存 Session、最终消息、文件及消息—文件关系；当前没有用户账号或跨用户权限模型
+- 同一 Session 用进程内集合拒绝并发 Chat；不同 Session 可并行，但多 worker / 多进程无法共享这把运行锁
+- 客户端断开后用户消息可能已持久化，模型执行是否继续取决于生成器生命周期；尚无任务恢复机制
 
 ### 3. 记忆系统（跨会话记忆）
 

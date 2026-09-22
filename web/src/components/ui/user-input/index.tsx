@@ -6,10 +6,15 @@ import { useDocumentUpload } from "@/hooks/useDocumentUpload";
 import DocumentAttachment from "@/components/ui/document-attachment";
 import styles from "./index.module.scss";
 import { Button } from "@/components/shadcn/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/shadcn/tooltip";
 
 interface UserInputProps {
   /** 发送一条消息 */
-  onSend: (text: string) => void;
+  onSend: (text: string, refFileIds: string[]) => void;
   /** 是否有请求正在运行 */
   running: boolean;
 }
@@ -33,8 +38,13 @@ export default function UserInput({ onSend, running }: UserInputProps) {
     if (!text.trim() || running) {
       return;
     }
-    onSend(text);
+    const refFileIds =
+      uploadState.status === "uploaded" ? [uploadState.document.file_id] : [];
+    onSend(text, refFileIds);
     clear();
+    if (refFileIds.length > 0) {
+      documentUpload.reset();
+    }
   };
 
   // Enter 发送，Shift+Enter 换行
@@ -89,20 +99,26 @@ export default function UserInput({ onSend, running }: UserInputProps) {
             hidden
             onChange={onFileChange}
           />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="上传 PDF"
-            title="上传 PDF"
-            disabled={
-              uploadState.status === "uploading" ||
-              uploadState.status === "cancelling"
-            }
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <Paperclip />
-          </Button>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="上传 PDF"
+                  disabled={
+                    uploadState.status === "uploading" ||
+                    uploadState.status === "cancelling"
+                  }
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <Paperclip />
+                </Button>
+              }
+            />
+            <TooltipContent>仅支持单个 PDF，最大 10 MiB</TooltipContent>
+          </Tooltip>
         </div>
         <div className={styles.userInputHandleAreaRight}>
           <Button onClick={submit} disabled={running}>

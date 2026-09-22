@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
-import { streamChat, type AgentEvent } from "@/adapter";
+import { getSessionHistory, streamChat, type AgentEvent } from "@/adapter";
+import { useSessionStore } from "@/stores/session";
 
 /** 一条聊天记录：用户输入原文，或助手回合的原始事件流。 */
 export type ChatEntry =
@@ -15,8 +16,12 @@ export function useChat() {
   const [error, setError] = useState("");
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const runningRef = useRef(false);
+  const recoveryNeededRef = useRef(false);
+  const setCurrentMessageId = useSessionStore(
+    (state) => state.setCurrentMessageId,
+  );
 
-  const send = async (message: string) => {
+  const send = async (message: string, refFileIds: string[] = []) => {
     if (runningRef.current) {
       return;
     }
@@ -29,7 +34,21 @@ export function useChat() {
       { kind: "assistant", id: crypto.randomUUID(), events: [] },
     ]);
     try {
-      for await (const event of await streamChat(message)) {
+      const { sessionId } = useSessionStore.getState();
+      if (recoveryNeededRef.current) {
+        const history = await getSessionHistory(sessionId);
+        if (history?.session.current_message_id != null) {
+          setCurrentMessageId(history.session.current_message_id);
+        }
+        recoveryNeededRef.current = false;
+      }
+      const parentMessageId = useSessionStore.getState().currentMessageId;
+      for await (const event of await streamChat({
+        session_id: sessionId,
+        parent_message_id: parentMessageId,
+        message,
+        ref_file_ids: refFileIds,
+      })) {
         console.log("dev: event", event);
         setEntries((prev) => {
           const next = [...prev];
@@ -45,9 +64,25 @@ export function useChat() {
         if (event.type === "error") {
           setError(event.message);
         }
+        if (event.type === "user_message" || event.type === "done") {
+          setCurrentMessageId(event.message_id);
+          recoveryNeededRef.current = false;
+        }
       }
     } catch (cause) {
+      recoveryNeededRef.current = true;
       setError(cause instanceof Error ? cause.message : String(cause));
+      // 请求可能已在后端创建用户消息，但 SSE 首帧未抵达浏览器。
+      const sessionId = useSessionStore.getState().sessionId;
+      try {
+        const history = await getSessionHistory(sessionId);
+        if (history?.session.current_message_id != null) {
+          setCurrentMessageId(history.session.current_message_id);
+        }
+        recoveryNeededRef.current = false;
+      } catch {
+        // 保留原始网络错误；下次发送前重试恢复指针。
+      }
     } finally {
       runningRef.current = false;
       setRunning(false);

@@ -1,5 +1,5 @@
-"""上传文档的隔离存储。"""
+"""上传文件的隔离存储与生命周期管理。"""
 
-from .storage import DOCUMENT_ROOT, MAX_DOCUMENT_BYTES, DocumentUploadError, save_pdf
+from .storage import FILE_ROOT, MAX_FILE_BYTES, FileUploadError, save_pdf
 
-__all__ = ["DOCUMENT_ROOT", "MAX_DOCUMENT_BYTES", "DocumentUploadError", "save_pdf"]
+__all__ = ["FILE_ROOT", "MAX_FILE_BYTES", "FileUploadError", "save_pdf"]

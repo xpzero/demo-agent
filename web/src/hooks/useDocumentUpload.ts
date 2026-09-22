@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   MAX_PDF_BYTES,
   uploadDocument,
-  type UploadedDocument,
+  type UploadedFile,
 } from "@/adapter/documents";
 
 export type DocumentUploadState =
@@ -10,7 +10,7 @@ export type DocumentUploadState =
   | { status: "invalid"; file: File; message: string }
   | { status: "uploading"; file: File }
   | { status: "cancelling"; file: File }
-  | { status: "uploaded"; file: File; document: UploadedDocument }
+  | { status: "uploaded"; file: File; document: UploadedFile }
   | { status: "failed"; file: File; message: string };
 
 function validatePdf(file: File): string | null {
