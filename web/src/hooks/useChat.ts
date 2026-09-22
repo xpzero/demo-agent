@@ -49,7 +49,6 @@ export function useChat() {
         message,
         ref_file_ids: refFileIds,
       })) {
-        console.log("dev: event", event);
         setEntries((prev) => {
           const next = [...prev];
           const last = next[next.length - 1];
@@ -70,11 +69,11 @@ export function useChat() {
         }
       }
     } catch (cause) {
-      recoveryNeededRef.current = true;
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(message);
-      // 请求可能已在后端创建用户消息，但 SSE 首帧未抵达浏览器。
-      const sessionId = useSessionStore.getState().sessionId;
+      // 请求可能已在后端创建用户消息，但 SSE 首帧未抵达浏览器；
+      // 标记待恢复，下次发送前用历史接口对齐父消息指针。
+      recoveryNeededRef.current = true;
       // 失败也要在气泡里留下可见痕迹，不能永远停在「思考中」。
       setEntries((prev) => {
         const next = [...prev];
@@ -87,15 +86,6 @@ export function useChat() {
         }
         return next;
       });
-      try {
-        const history = await getSessionHistory(sessionId);
-        if (history?.session.current_message_id != null) {
-          setCurrentMessageId(history.session.current_message_id);
-        }
-        recoveryNeededRef.current = false;
-      } catch {
-        // 保留原始网络错误；下次发送前重试恢复指针。
-      }
     } finally {
       runningRef.current = false;
       setRunning(false);
