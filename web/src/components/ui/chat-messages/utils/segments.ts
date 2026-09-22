@@ -32,6 +32,8 @@ export function deriveSegments(events: AgentEvent[]): Segment[] {
       }
     } else if (event.type === "max_turns") {
       segments.push({ kind: "note", text: "已达到最大轮次" });
+    } else if (event.type === "error") {
+      segments.push({ kind: "note", text: `出错了：${event.message}` });
     }
   }
   return segments;

@@ -21,6 +21,10 @@ export async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator
   while (true) {
     const { done, value } = await reader.read();
     if (done) {
+      // EOF 时还剩半帧，说明流被截断，不能当正常结束。
+      if (buffer.trim() !== "") {
+        throw new Error("响应中断：数据流在不完整的消息帧处结束");
+      }
       break;
     }
 

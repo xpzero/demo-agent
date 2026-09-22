@@ -1,8 +1,11 @@
 """上传文件垃圾回收：仅处理受控根目录下的服务端 file_id 目录。"""
 
+import errno
 import json
 import logging
+import os
 import re
+import stat
 import time
 from pathlib import Path
 
@@ -25,16 +28,36 @@ def _valid_directory(root: Path, directory: Path) -> bool:
     )
 
 
+def _open_pinned(directory: Path) -> int | None:
+    """用 O_NOFOLLOW 打开目录并固定其 inode，避免校验后路径被换成符号链接。
+
+    返回 None 表示路径不存在或已被换成符号链接/非目录对象，调用方应跳过。
+    """
+    try:
+        return os.open(directory, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.ENOTDIR, errno.ENOENT):
+            return None
+        raise
+
+
 def _remove_flat_directory(root: Path, directory: Path) -> bool:
-    """删除服务生成的扁平目录；遇到真实子目录时拒绝递归删除。"""
+    """删除服务生成的扁平目录；全程通过固定句柄操作，避免 TOCTOU 符号链接竞态。"""
     if not directory.exists():
         return False
     if not _valid_directory(root, directory):
         raise ValueError(f"拒绝删除不受控目录: {directory}")
-    for child in directory.iterdir():
-        if child.is_dir() and not child.is_symlink():
-            raise ValueError(f"拒绝递归删除意外子目录: {child}")
-        child.unlink(missing_ok=True)
+    fd = _open_pinned(directory)
+    if fd is None:
+        return False
+    try:
+        for name in os.listdir(fd):
+            if stat.S_ISDIR(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
+                raise ValueError(f"拒绝递归删除意外子目录: {directory / name}")
+            os.unlink(name, dir_fd=fd)
+    finally:
+        os.close(fd)
+    # 此刻真实目录已空；若路径被换走，rmdir 会因非空/非目录失败而非误删
     directory.rmdir()
     return True
 
@@ -49,13 +72,19 @@ def cleanup_stale_temporary_files(
     for directory in root.iterdir():
         if not _valid_directory(root, directory):
             continue
-        for child in directory.iterdir():
-            if not child.name.endswith((".uploading", ".parsing")):
-                continue
-            if child.stat(follow_symlinks=False).st_mtime >= cutoff:
-                continue
-            child.unlink(missing_ok=True)
-            removed += 1
+        fd = _open_pinned(directory)
+        if fd is None:
+            continue
+        try:
+            for name in os.listdir(fd):
+                if not name.endswith((".uploading", ".parsing")):
+                    continue
+                if os.stat(name, dir_fd=fd, follow_symlinks=False).st_mtime >= cutoff:
+                    continue
+                os.unlink(name, dir_fd=fd)
+                removed += 1
+        finally:
+            os.close(fd)
     return removed
 
 
