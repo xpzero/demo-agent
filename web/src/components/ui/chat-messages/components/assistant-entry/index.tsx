@@ -5,7 +5,7 @@ import { Spinner } from "@/components/shadcn/spinner";
 import { CircleCheckIcon } from "lucide-react";
 import { deriveSegments } from "../../utils/segments";
 
-/** 助手条目：从原始事件派生分段渲染，事件为空时显示「思考中」。 */
+/** 助手条目：从原始事件派生分段渲染；没有可见分段时显示「思考中」。 */
 export default function AssistantEntry({ events }: { events: AgentEvent[] }) {
   const segments = deriveSegments(events);
   return (
@@ -37,7 +37,7 @@ export default function AssistantEntry({ events }: { events: AgentEvent[] }) {
             );
           }
         })}
-        {events.length === 0 && (
+        {segments.length === 0 && (
           <Marker>
             <MarkerIcon>
               <Spinner />

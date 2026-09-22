@@ -47,9 +47,13 @@ export default function UserInput({ onSend, running }: UserInputProps) {
     }
   };
 
-  // Enter 发送，Shift+Enter 换行
+  // Enter 发送，Shift+Enter 换行；中文输入法选词确认的 Enter 不触发发送
   const onEnter = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.nativeEvent.isComposing
+    ) {
       event.preventDefault();
       submit();
     }
