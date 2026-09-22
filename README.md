@@ -160,6 +160,8 @@ demo-agent/
 
 `stream_events` 是唯一的 Agent 内核。它把智谱（OpenAI 兼容协议）的流式 chunk 翻译成项目自己的 `text_delta`、`tool_call`、`tool_result`、`done`、`max_turns` 与 `error`；FastAPI 层把同一事件编码成 SSE。这样前端不用理解模型的完整流式协议，后端内部也不掺杂打印或页面逻辑。
 
+每次 SSE 响应必须以 `done` 或 `error` 结束：出现 `max_turns` 时 API 层会紧随其后追加一帧 `error` 终止；`stream_events` 抛错或未产出终止事件时，API 层同样输出 `error` 再结束。前端 `readSse` 把没有终止事件的 EOF 视为响应中断。整轮回复有总时限（`MAX_RUN_SECONDS`，默认 300 秒），模型网络连接或读取等待上限为 60 秒且禁用 SDK 自动重试，`web_search` / `fetch_url` 各最多等待 30 秒；超时后以 `error` 结束，并释放该会话的运行标记。
+
 ## 踩过的坑
 
 - **编辑器没有导入补全**：pyright 默认用 PATH 里的系统 python，不会自动探测项目里的 `.venv`。在 `pyproject.toml` 加 `[tool.pyright]` 的 `venvPath = "."` 和 `venv = ".venv"` 解决
@@ -184,6 +186,7 @@ demo-agent/
 - `write_file` 无确认直接覆盖文件，没有备份或事务，也还没有“读取外部内容后禁止写入”等隔离
 - 没有上下文长度控制，多轮对话久了会超出 token 上限
 - 没有应用层重试策略；模型请求或流处理异常会转成 `error` 事件，但中断的任务不会自动续跑
+- 300 秒整轮时限只在模型 chunk 边界与工具执行前后检查；已进入阻塞的工具调用无法被强行抢占，超时要等调用返回后才生效
 - HTTP 聊天用进程内标志与锁阻止并发运行；多 worker 或多进程部署不受支持
 
 ## 后续计划
