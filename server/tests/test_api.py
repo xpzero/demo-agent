@@ -132,6 +132,41 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(history["session"]["current_message_id"], history["messages"][0]["id"])
         self.assertEqual(api._running_sessions, set())
 
+    def test_stream_without_terminal_event_emits_error_and_releases_session(self):
+        with patch.object(api, "stream_events", return_value=iter([
+            {"type": "text_delta", "text": "partial"},
+        ])):
+            response = self.client.post("/api/chat", json=self.payload())
+        self.assertEqual(
+            [event["type"] for event in self.events(response)],
+            ["user_message", "text_delta", "error"],
+        )
+        self.assertEqual(api._running_sessions, set())
+
+    def test_max_turns_ends_with_error_and_releases_session(self):
+        with patch.object(api, "stream_events", return_value=iter([
+            {"type": "max_turns"},
+        ])):
+            response = self.client.post("/api/chat", json=self.payload())
+        self.assertEqual(
+            [event["type"] for event in self.events(response)],
+            ["user_message", "max_turns", "error"],
+        )
+        self.assertEqual(api._running_sessions, set())
+
+    def test_stream_exception_emits_error_and_releases_session(self):
+        def broken(_items):
+            yield {"type": "text_delta", "text": "partial"}
+            raise RuntimeError("stream interrupted")
+
+        with patch.object(api, "stream_events", side_effect=broken):
+            response = self.client.post("/api/chat", json=self.payload())
+        self.assertEqual(
+            [event["type"] for event in self.events(response)],
+            ["user_message", "text_delta", "error"],
+        )
+        self.assertEqual(api._running_sessions, set())
+
     def test_assistant_persistence_failure_emits_error_not_done(self):
         with patch.object(Database, "add_assistant_message", side_effect=RuntimeError("write failed")):
             with patch.object(api, "stream_events", return_value=iter([

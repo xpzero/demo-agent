@@ -139,6 +139,7 @@ def chat(body: ChatRequest):
     def sse():
         try:
             yield _sse({"type": "user_message", "message_id": user_message_id})
+            terminated = False
             for event in stream_events(items):
                 if event["type"] == "done":
                     content = event["content"]
@@ -163,6 +164,13 @@ def chat(body: ChatRequest):
                             return
                     event = {**event, "message_id": message_id}
                 yield _sse(event)
+                if event["type"] in ("done", "error"):
+                    terminated = True
+                    break
+            if not terminated:
+                yield _sse({"type": "error", "message": "本轮回复未完成，请重试"})
+        except Exception as error:
+            yield _sse({"type": "error", "message": f"回复中断：{type(error).__name__}: {error}"})
         finally:
             release_session()
 

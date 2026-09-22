@@ -245,6 +245,23 @@ class StreamEventsTests(unittest.TestCase):
             ["call_1", "call_2"],
         )
 
+    def test_slow_model_stream_becomes_timeout_error(self):
+        items = [{"role": "user", "content": "hello"}]
+        with patch.object(loop.time, "monotonic", side_effect=[0, 1, 301]):
+            events, _, execute = self.run_with_streams(items, [[text_delta("late")]])
+        self.assertEqual(events, [{"type": "error", "message": "TimeoutError: 本轮回复超时，请重试"}])
+        execute.assert_not_called()
+
+    def test_slow_tool_does_not_start_next_model_request(self):
+        items = [{"role": "user", "content": "hello"}]
+        stream = [[tool_delta(0, call_id="call_1", name="get_weather", arguments='{"city":"北京"}')]]
+        with patch.object(loop.time, "monotonic", side_effect=[0, 1, 2, 3, 301]):
+            events, requests, execute = self.run_with_streams(items, stream, tool_results=["晴"])
+        self.assertEqual([event["type"] for event in events], ["tool_call", "error"])
+        self.assertIn("TimeoutError", events[-1]["message"])
+        self.assertEqual(len(requests), 1)
+        execute.assert_called_once()
+
     def test_request_exception_becomes_error_event(self):
         create = Mock(side_effect=ConnectionError("network down"))
         fake_client = SimpleNamespace(

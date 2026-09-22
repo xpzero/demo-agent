@@ -10,6 +10,8 @@ load_dotenv()
 client = OpenAI(
     api_key=os.getenv("API_KEY"),
     base_url=os.getenv("BASE_URL") or "https://open.bigmodel.cn/api/paas/v4",
+    timeout=60.0,  # 网络等待上限；整轮时限由 agent loop 检查
+    max_retries=0,  # 避免 SDK 自动重试把卡住的请求延长数倍
 )
 
 # 模型与系统提示词可在 .env 中覆盖；未设置或留空时使用学习项目的默认值

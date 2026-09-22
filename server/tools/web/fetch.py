@@ -20,7 +20,7 @@ SCHEMA = {
 
 def run(args: dict) -> str:
     url = args["url"]
-    response = client().extract(urls=[url], format="markdown")
+    response = client().extract(urls=[url], format="markdown", timeout=30)
 
     results = response.get("results", [])
     if not results:

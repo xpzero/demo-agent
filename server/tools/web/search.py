@@ -19,7 +19,7 @@ SCHEMA = {
 
 
 def run(args: dict) -> str:
-    response = client().search(query=args["query"], max_results=MAX_RESULTS)
+    response = client().search(query=args["query"], max_results=MAX_RESULTS, timeout=30)
     results = response.get("results", [])
 
     if not results:
