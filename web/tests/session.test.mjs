@@ -35,3 +35,17 @@ test("失败请求只移除自己的临时条目，不影响重试或新会话",
   assert.notEqual(next.id, second.id);
   assert.equal(useSessionStore.getState().pendingSession, next);
 });
+
+test("每次切换或新建会话都产生新的视图代次，消息写入不改变代次", () => {
+  const initial = useSessionStore.getState().sessionGeneration;
+  useSessionStore.getState().newSession();
+  assert.equal(useSessionStore.getState().sessionGeneration, initial + 1);
+  useSessionStore.getState().setCurrentMessageId(42);
+  assert.equal(useSessionStore.getState().sessionGeneration, initial + 1);
+
+  const existingId = crypto.randomUUID();
+  useSessionStore.getState().switchSession(existingId);
+  assert.equal(useSessionStore.getState().sessionGeneration, initial + 2);
+  useSessionStore.getState().switchSession(existingId);
+  assert.equal(useSessionStore.getState().sessionGeneration, initial + 3);
+});

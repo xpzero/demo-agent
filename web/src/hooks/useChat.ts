@@ -1,43 +1,32 @@
-import { useCallback, useRef, useState } from "react";
-import { getSessionHistory, streamChat, type SessionHistory } from "@/adapter";
+import { useEffect, useRef, useState } from "react";
+import { getSessionHistory, streamChat } from "@/adapter";
 import { useSessionStore } from "@/stores/session";
-import type { ChatMessage } from "@/chat/message";
-import { historyToMessages, syncMessageTimestamps } from "@/chat/messageHistory";
+import { syncMessageTimestamps } from "@/chat/messageHistory";
 import { appendPendingTurn, applyChatEvent, type TurnIds } from "@/chat/messageUpdates";
-import { useSessionHistory } from "./useSessionHistory";
+import { useSessionMessages } from "./useSessionMessages";
 
 /**
  * 页内消息状态和发送流程；runningRef 保证同一时刻最多一条进行中的流。
  */
 export function useChat(onConversationChanged: () => void) {
   const sessionId = useSessionStore((state) => state.sessionId);
-  const sessionRevision = useSessionStore((state) => state.sessionRevision);
+  const sessionGeneration = useSessionStore((state) => state.sessionGeneration);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const runningRef = useRef(false);
   const recoveryNeededRef = useRef(false);
-  const setCurrentMessageId = useSessionStore(
-    (state) => state.setCurrentMessageId,
-  );
+  const setCurrentMessageId = useSessionStore((state) => state.setCurrentMessageId);
 
-  const onHistoryReset = useCallback(() => {
-    setMessages([]);
+  const { messages, setMessages, historyReady, loadingHistory, historyError, retryHistory } =
+    useSessionMessages(sessionId, sessionGeneration);
+
+  useEffect(() => {
     setError("");
     recoveryNeededRef.current = false;
-  }, []);
-
-  const onHistoryLoaded = useCallback((history: SessionHistory | null) => {
-    setCurrentMessageId(history?.session.current_message_id ?? null);
-    setMessages(history ? historyToMessages(history.messages) : []);
-  }, [setCurrentMessageId]);
-
-  const { historyReady, loadingHistory, historyError, retryHistory } = useSessionHistory({
-    sessionId, sessionRevision, onReset: onHistoryReset, onLoaded: onHistoryLoaded,
-  });
+  }, [sessionGeneration]);
 
   const send = async (message: string, refFileIds: string[] = []) => {
-    if (runningRef.current || !historyReady || useSessionStore.getState().sessionRevision !== sessionRevision) {
+    if (runningRef.current || !historyReady || useSessionStore.getState().sessionGeneration !== sessionGeneration) {
       return;
     }
     runningRef.current = true;
@@ -83,12 +72,14 @@ export function useChat(onConversationChanged: () => void) {
       runningRef.current = false;
       setRunning(false);
       onConversationChanged();
-      const sentSessionId = sessionId;
-      const sentRevision = sessionRevision;
-      void getSessionHistory(sentSessionId).then((history) => {
-        if (useSessionStore.getState().sessionRevision !== sentRevision) return;
+      void getSessionHistory(sessionId).then((history) => {
+        if (useSessionStore.getState().sessionGeneration !== sessionGeneration) {
+          return;
+        }
         if (!history) {
-          if (pendingSession) useSessionStore.getState().discardPendingSession(pendingSession);
+          if (pendingSession) {
+            useSessionStore.getState().discardPendingSession(pendingSession);
+          }
           return;
         }
         setMessages((prev) => syncMessageTimestamps(prev, history.messages));
@@ -101,11 +92,14 @@ export function useChat(onConversationChanged: () => void) {
   return {
     running,
     error,
-    messages: historyReady ? messages : [],
+    messages,
     send,
     historyReady,
     loadingHistory,
     historyError,
-    retryHistory,
+    retryHistory: () => {
+      setError("");
+      retryHistory();
+    },
   };
 }

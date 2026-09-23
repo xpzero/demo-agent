@@ -58,7 +58,7 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 - `server/tools/`：工具 schema、实现、注册和执行分发。
 - `server/api.py`：FastAPI 路由、进程内会话运行保护、CORS 和项目事件到 SSE 的传输映射；`server/database/` 持久化 Session/Message/File。
 - `web/src/adapter/`：HTTP 请求、SSE 分帧与项目事件类型定义，不依赖任何 UI 框架。`types.ts` 是事件类型，`transport.ts` 是 API 地址、请求错误与 SSE 分帧，`index.ts` 是聊天请求与公共导出。
-- `web/src/App.tsx`：界面组合层；当前为重写占位，展示逻辑与 `adapter/` 保持分离。
+- `web/src/App.tsx`：界面组合层；`web/src/chat/` 管理前端消息模型与纯函数，`web/src/hooks/` 管理请求与状态，展示逻辑与 `adapter/` 保持分离。
 
 保持模型传输、Agent 编排、工具实现、会话存储和网页呈现分离。不要在 `stream_events` 中打印、读终端输入、生成 SSE 帧或依赖 React 语义。
 
@@ -134,6 +134,8 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 ## 编码、依赖与文档
 
 - 延续现有简洁、显式的实现；除非任务明确需要，不引入 Agent 框架或新的生产依赖。
+- 当文件承担多个可独立理解或测试的职责时，按职责拆分组件、纯函数或 hook；优先提取不依赖 React 状态的逻辑，并保持交互状态有明确的唯一所有者。不要仅因行数增长而拆分，也不要为拆分引入跨模块状态同步或层层透传的回调。
+- 前端不默认使用 `useCallback` / `useMemo`；只有稳定引用确实用于 effect 依赖、需要引用稳定的消费者或经确认的性能问题时才使用。优先理清状态所有权和依赖，不为让过度拆分的 hook 能运行而添加缓存。
 - 前端代码风格：`if` 语句必须使用花括号，单行 `if (...) return/throw/break` 写法一律展开为多行。
 - 用户可见文本和主要说明使用中文；新增提示、错误和文档保持一致。
 - 后端依赖变化同时更新 `server/pyproject.toml` 和 `server/uv.lock`；前端依赖变化同时更新 `web/package.json` 和 `web/pnpm-lock.yaml`。
@@ -146,7 +148,7 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 - 只改文档：检查路径、命令、字段和当前代码一致；无需把未运行的测试写成已通过。
 - 修改 Agent loop、工具协议或会话格式：运行完整后端 unittest。
 - 修改 API、SSE 或项目事件：运行完整后端 unittest，并运行前端 `pnpm lint` 与 `pnpm build`；同时补充中断、错误和事件顺序测试。
-- 修改前端：至少运行 `pnpm lint` 与 `pnpm build`。仓库当前没有前端测试脚本；涉及文本—工具—文本呈现时必须人工验证文本段不丢失、不合并、不重排。
+- 修改前端：至少运行 `pnpm lint` 与 `pnpm build`；涉及前端行为时运行 `pnpm test`。涉及文本—工具—文本呈现时还必须人工验证文本段不丢失、不合并、不重排。
 - 修改 Python 依赖或锁文件：运行 `uv lock --check` 和受影响的后端测试。
 - 修改前端依赖或锁文件：使用锁定安装语义，并运行 `pnpm lint` 与 `pnpm build`。
 - 测试不得依赖真实智谱/Tavily 请求。使用 mock 构造 chunk 流、同轮多个 tool calls 和错误路径。

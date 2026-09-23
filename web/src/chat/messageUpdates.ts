@@ -3,6 +3,7 @@ import type { ChatMessage } from "./message.ts";
 
 export type TurnIds = { userId: string; assistantId: string };
 
+/** 本地 ID 保持消息在流式更新时的渲染 key 稳定；落库 ID 另存为 messageId。 */
 export function appendPendingTurn(
   messages: ChatMessage[],
   text: string,

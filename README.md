@@ -126,9 +126,12 @@ demo-agent/
 │   │   ├── files/           # 文件类（paths.py 做路径校验）
 │   │   └── web/             # 联网类（client.py 含截断与不可信标注）
 │   └── .env                 # API key 与 base url
-└── web/                     # Vite + React 前端（UI 重写中）
+└── web/                     # Vite + React 前端
     └── src/
         ├── adapter/         # 调后端、解析 SSE、还原项目事件
+        ├── chat/            # 前端消息模型、历史映射与流式事件更新纯函数
+        ├── hooks/           # 当前会话消息加载、发送与会话列表请求
+        ├── components/      # 侧边栏、消息展示和输入框
         └── stores/          # 页内输入状态与当前 Session 指针
 ```
 

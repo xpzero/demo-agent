@@ -15,7 +15,7 @@ import { useSessions } from "@/hooks/useSessions";
 
 export default function App() {
   const clear = useUserInputStore((state) => state.clear);
-  const sessionRevision = useSessionStore((state) => state.sessionRevision);
+  const sessionGeneration = useSessionStore((state) => state.sessionGeneration);
   const { sessions, loading, error: sessionsError, refresh } = useSessions();
   const {
     running, error, messages, send, historyReady, loadingHistory, historyError, retryHistory,
@@ -23,13 +23,17 @@ export default function App() {
   const busy = running || loadingHistory;
 
   const selectSession = (id: string) => {
-    if (busy) return;
+    if (busy) {
+      return;
+    }
     clear();
     useSessionStore.getState().switchSession(id);
   };
 
   const newSession = () => {
-    if (busy) return;
+    if (busy) {
+      return;
+    }
     clear();
     useSessionStore.getState().newSession();
   };
@@ -57,7 +61,7 @@ export default function App() {
               {loadingHistory ? (
                 <p className="text-sm text-muted-foreground">加载会话中…</p>
               ) : (
-                <ChatMessages key={sessionRevision} messages={messages} />
+                <ChatMessages key={sessionGeneration} messages={messages} />
               )}
             </div>
             {historyError && (
@@ -70,7 +74,7 @@ export default function App() {
 
             <div className="flex w-full shrink-0 justify-center">
               <UserInput
-                key={sessionRevision}
+                key={sessionGeneration}
                 onSend={send}
                 running={running || !historyReady}
                 historyReady={historyReady}

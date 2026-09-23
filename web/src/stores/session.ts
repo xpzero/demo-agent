@@ -5,7 +5,8 @@ type PendingSession = { id: string; title: string };
 type SessionState = {
   sessionId: string;
   pendingSession: PendingSession | null;
-  sessionRevision: number;
+  /** 前端会话视图代次；切换时递增，用于丢弃旧请求结果，不是服务端修订号。 */
+  sessionGeneration: number;
   currentMessageId: number | null;
   isNewSession: boolean;
   setCurrentMessageId: (id: number | null) => void;
@@ -20,7 +21,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
   return {
     sessionId,
     pendingSession: null,
-    sessionRevision: 0,
+    sessionGeneration: 0,
     currentMessageId: null,
     isNewSession: true,
     setCurrentMessageId: (id) => set((state) => ({
@@ -28,7 +29,9 @@ export const useSessionStore = create<SessionState>((set, get) => {
       isNewSession: id === null ? state.isNewSession : false,
     })),
     beginSession: (message) => {
-      if (!get().isNewSession) return null;
+      if (!get().isNewSession) {
+        return null;
+      }
       const pending = { id: get().sessionId, title: message.trim().slice(0, 30) || "新对话" };
       set({ pendingSession: pending });
       return pending;
@@ -39,7 +42,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
     switchSession: (id) => set((state) => ({
       sessionId: id,
       pendingSession: null,
-      sessionRevision: state.sessionRevision + 1,
+      sessionGeneration: state.sessionGeneration + 1,
       currentMessageId: null,
       isNewSession: false,
     })),
@@ -48,7 +51,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
       return {
         sessionId,
         pendingSession: null,
-        sessionRevision: state.sessionRevision + 1,
+        sessionGeneration: state.sessionGeneration + 1,
         currentMessageId: null,
         isNewSession: true,
       };
