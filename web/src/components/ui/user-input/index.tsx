@@ -17,10 +17,13 @@ interface UserInputProps {
   onSend: (text: string, refFileIds: string[]) => void;
   /** 是否有请求正在运行 */
   running: boolean;
+  /** 当前会话的消息历史已准备好 */
+  historyReady: boolean;
 }
 
-export default function UserInput({ onSend, running }: UserInputProps) {
+export default function UserInput({ onSend, running, historyReady }: UserInputProps) {
   const ref = useRef<HTMLDivElement>(null);
+  const didAutoFocus = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const text = useUserInputStore((state) => state.text);
   const setText = useUserInputStore((state) => state.setText);
@@ -76,12 +79,25 @@ export default function UserInput({ onSend, running }: UserInputProps) {
     }
   }, [text]);
 
+  useEffect(() => {
+    if (
+      !historyReady ||
+      didAutoFocus.current ||
+      !window.matchMedia("(min-width: 768px)").matches
+    ) return;
+    ref.current?.focus({ preventScroll: true });
+    didAutoFocus.current = true;
+  }, [historyReady]);
+
   return (
     <div className={styles.userInputContainer}>
       <div
         className={styles.userInputTextArea}
         ref={ref}
         contentEditable
+        role="textbox"
+        aria-label="消息输入"
+        aria-multiline="true"
         onInput={handleInput}
         onKeyDown={onEnter}
         suppressContentEditableWarning

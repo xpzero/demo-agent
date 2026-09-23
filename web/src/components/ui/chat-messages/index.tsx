@@ -1,4 +1,4 @@
-import type { ChatEntry } from "@/hooks/useChat";
+import type { ChatMessage } from "@/chat/message";
 import {
   MessageScroller,
   MessageScrollerButton,
@@ -6,21 +6,21 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "@/components/shadcn/message-scroller";
-import EntryRow from "./components/entry-row";
+import MessageItem from "./components/message-item";
 
 interface ChatMessagesProps {
-  entries: ChatEntry[];
+  messages: ChatMessage[];
 }
 
 /** 聊天记录列表：条目顺序渲染；autoScroll 仅在读者位于底部时跟随流式输出。 */
-export default function ChatMessages({ entries }: ChatMessagesProps) {
+export default function ChatMessages({ messages }: ChatMessagesProps) {
   return (
     <MessageScrollerProvider autoScroll>
       <MessageScroller className="w-full flex-1">
         <MessageScrollerViewport className="scrollbar-thumb-border">
           <MessageScrollerContent className="mx-auto w-full max-w-[500px]">
-            {entries.map((entry) => (
-              <EntryRow key={entry.id} entry={entry} />
+            {messages.map((message) => (
+              <MessageItem key={message.id} message={message} />
             ))}
           </MessageScrollerContent>
         </MessageScrollerViewport>
