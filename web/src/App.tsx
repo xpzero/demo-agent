@@ -18,7 +18,7 @@ export default function App() {
   const sessionRevision = useSessionStore((state) => state.sessionRevision);
   const { sessions, loading, error: sessionsError, refresh } = useSessions();
   const {
-    running, error, entries, send, historyReady, loadingHistory, historyError, retryHistory,
+    running, error, messages, send, historyReady, loadingHistory, historyError, retryHistory,
   } = useChat(() => { void refresh(); });
   const busy = running || loadingHistory;
 
@@ -57,7 +57,7 @@ export default function App() {
               {loadingHistory ? (
                 <p className="text-sm text-muted-foreground">加载会话中…</p>
               ) : (
-                <ChatMessages key={sessionRevision} entries={entries} />
+                <ChatMessages key={sessionRevision} messages={messages} />
               )}
             </div>
             {historyError && (
