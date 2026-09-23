@@ -97,7 +97,7 @@ class ChatApiTests(unittest.TestCase):
         )
         seen = []
 
-        def stream(items):
+        def stream(items, context=None):
             seen.extend(items)
             yield {"type": "done", "content": "second answer"}
 
@@ -155,7 +155,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(api._running_sessions, set())
 
     def test_stream_exception_emits_error_and_releases_session(self):
-        def broken(_items):
+        def broken(_items, context=None):
             yield {"type": "text_delta", "text": "partial"}
             raise RuntimeError("stream interrupted")
 

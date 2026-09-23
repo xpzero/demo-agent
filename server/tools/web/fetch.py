@@ -18,7 +18,7 @@ SCHEMA = {
 }
 
 
-def run(args: dict) -> str:
+def run(args: dict, context=None) -> str:
     url = args["url"]
     response = client().extract(urls=[url], format="markdown", timeout=30)
 

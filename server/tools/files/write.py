@@ -24,7 +24,7 @@ SCHEMA = {
 }
 
 
-def run(args: dict) -> str:
+def run(args: dict, context=None) -> str:
     content = args["content"]
     if not isinstance(content, str):
         raise TypeError("content 必须是字符串")

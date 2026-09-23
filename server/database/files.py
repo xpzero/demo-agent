@@ -60,6 +60,25 @@ class FileStoreMixin:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_session_files(self, session_id: str) -> list[dict]:
+        """列出某会话关联的全部附件，按消息 id 倒序（最近的最靠前）。"""
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT files.id, files.filename, files.content_type,
+                       files.size, files.storage_path, files.upload_status,
+                       files.created_at
+                FROM message_files
+                JOIN files ON files.id = message_files.file_id
+                JOIN chat_messages
+                  ON chat_messages.id = message_files.message_id
+                WHERE chat_messages.session_id = ?
+                ORDER BY chat_messages.id DESC, message_files.position
+                """,
+                (session_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def all_file_ids(self) -> set[str]:
         with self.connection() as connection:
             rows = connection.execute("SELECT id FROM files").fetchall()

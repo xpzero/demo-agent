@@ -18,7 +18,7 @@ SCHEMA = {
 }
 
 
-def run(args: dict) -> str:
+def run(args: dict, context=None) -> str:
     response = client().search(query=args["query"], max_results=MAX_RESULTS, timeout=30)
     results = response.get("results", [])
 

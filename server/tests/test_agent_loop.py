@@ -214,8 +214,8 @@ class StreamEventsTests(unittest.TestCase):
         )
         execute.assert_has_calls(
             [
-                call("calculate", {"expression": "1+2"}),
-                call("calculate", {"expression": "2*3"}),
+                call("calculate", {"expression": "1+2"}, None),
+                call("calculate", {"expression": "2*3"}, None),
             ]
         )
 
