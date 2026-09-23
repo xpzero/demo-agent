@@ -3,13 +3,42 @@ import type { AgentEvent } from "./types";
 
 export type { AgentEvent } from "./types";
 
-export type SessionHistory = {
-  session: { id: string; current_message_id: number | null };
+export type SessionSummary = {
+  id: string;
+  title: string;
+  current_message_id: number | null;
+  created_at: number;
+  updated_at: number;
 };
 
+export type SessionMessage = {
+  id: number;
+  parent_id: number | null;
+  role: "user" | "assistant";
+  status: string;
+  content: string;
+  created_at: number;
+  files: { id: string; filename: string }[];
+};
+
+export type SessionHistory = {
+  session: SessionSummary;
+  messages: SessionMessage[];
+};
+
+export async function listSessions(signal?: AbortSignal): Promise<SessionSummary[]> {
+  const response = await fetch(`${API_BASE}/api/sessions`, { signal });
+  if (!response.ok) throw await responseError(response);
+  const data = (await response.json()) as { sessions: SessionSummary[] };
+  return data.sessions;
+}
+
 /** 网络流在收到 user_message 前断开时，恢复服务端已持久化的父消息指针。 */
-export async function getSessionHistory(sessionId: string): Promise<SessionHistory | null> {
-  const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}`);
+export async function getSessionHistory(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<SessionHistory | null> {
+  const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}`, { signal });
   if (response.status === 404) {
     return null;
   }

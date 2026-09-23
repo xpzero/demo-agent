@@ -9,40 +9,72 @@ import {
 } from "@/components/shadcn/sidebar";
 import { TooltipProvider } from "@/components/shadcn/tooltip";
 import { useUserInputStore } from "@/stores";
+import { useSessionStore } from "@/stores/session";
 import { useChat } from "@/hooks/useChat";
+import { useSessions } from "@/hooks/useSessions";
 
 export default function App() {
-  const setText = useUserInputStore((state) => state.setText);
-  const appendText = useUserInputStore((state) => state.appendText);
   const clear = useUserInputStore((state) => state.clear);
-  const { running, error, entries, send } = useChat();
+  const sessionRevision = useSessionStore((state) => state.sessionRevision);
+  const { sessions, loading, error: sessionsError, refresh } = useSessions();
+  const {
+    running, error, entries, send, historyReady, loadingHistory, historyError, retryHistory,
+  } = useChat(() => { void refresh(); });
+  const busy = running || loadingHistory;
+
+  const selectSession = (id: string) => {
+    if (busy) return;
+    clear();
+    useSessionStore.getState().switchSession(id);
+  };
+
+  const newSession = () => {
+    if (busy) return;
+    clear();
+    useSessionStore.getState().newSession();
+  };
 
   return (
     <TooltipProvider>
       <SidebarProvider className="h-svh">
-        <AppSidebar />
-        <SidebarInset>
+        <AppSidebar
+          sessions={sessions}
+          loading={loading}
+          error={sessionsError}
+          busy={busy}
+          onSelectSession={selectSession}
+          onNewSession={newSession}
+          onRefresh={() => { void refresh(); }}
+        />
+        <SidebarInset className="h-full min-h-0 min-w-0 overflow-hidden">
           <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
             <SidebarTrigger />
             <h1 className="text-sm font-semibold">Agent Demo</h1>
           </header>
 
-          <main className="flex min-h-0 flex-1 flex-col items-center gap-4 py-8">
-            <ChatMessages entries={entries} />
+          <main className="flex min-h-0 flex-1 flex-col items-center gap-4 overflow-hidden py-8">
+            <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
+              {loadingHistory ? (
+                <p className="text-sm text-muted-foreground">加载会话中…</p>
+              ) : (
+                <ChatMessages key={sessionRevision} entries={entries} />
+              )}
+            </div>
+            {historyError && (
+              <div className="flex items-center gap-2 text-sm text-red-500">
+                <span>加载会话失败：{historyError}</span>
+                <Button variant="ghost" size="sm" onClick={retryHistory}>重试</Button>
+              </div>
+            )}
             {error && <p className="text-sm text-red-500">{error}</p>}
 
-            <UserInput onSend={send} running={running} />
-
-            <div className="flex flex-wrap justify-center gap-2">
-              <Button onClick={() => setText("你好，这段内容由 store 写入。")}>
-                写入一句话
-              </Button>
-              <Button variant="secondary" onClick={() => appendText("（追加）")}>
-                末尾追加
-              </Button>
-              <Button variant="destructive" onClick={clear}>
-                清空
-              </Button>
+            <div className="flex w-full shrink-0 justify-center">
+              <UserInput
+                key={sessionRevision}
+                onSend={send}
+                running={running || !historyReady}
+                historyReady={historyReady}
+              />
             </div>
           </main>
         </SidebarInset>

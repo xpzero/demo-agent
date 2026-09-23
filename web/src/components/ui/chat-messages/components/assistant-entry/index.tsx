@@ -1,4 +1,5 @@
 import type { AgentEvent } from "@/adapter";
+import type { ReactNode } from "react";
 import { Marker, MarkerContent, MarkerIcon } from "@/components/shadcn/marker";
 import { Message, MessageContent } from "@/components/shadcn/message";
 import { Spinner } from "@/components/shadcn/spinner";
@@ -6,7 +7,7 @@ import { CircleCheckIcon } from "lucide-react";
 import { deriveSegments } from "../../utils/segments";
 
 /** 助手条目：从原始事件派生分段渲染；没有可见分段时显示「思考中」。 */
-export default function AssistantEntry({ events }: { events: AgentEvent[] }) {
+export default function AssistantEntry({ events, footer }: { events: AgentEvent[]; footer: ReactNode }) {
   const segments = deriveSegments(events);
   return (
     <Message align="start">
@@ -45,6 +46,7 @@ export default function AssistantEntry({ events }: { events: AgentEvent[] }) {
             <MarkerContent>思考中…</MarkerContent>
           </Marker>
         )}
+        {footer}
       </MessageContent>
     </Message>
   );
