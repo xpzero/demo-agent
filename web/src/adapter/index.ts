@@ -24,7 +24,10 @@ export type SessionMessage = {
 };
 
 export type SessionHistory = {
-  session: SessionSummary;
+  session: SessionSummary & {
+    summary: string | null;
+    summary_upto_message_id: number | null;
+  };
   messages: SessionMessage[];
 };
 

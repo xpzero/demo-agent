@@ -141,7 +141,7 @@ demo-agent/
         └── stores/          # 页内输入状态与当前 Session 指针
 ```
 
-文件工具的根目录限定在 `server/` 内——Agent 读写不到 `web/` 与仓库根，`.env`、`.git` 与 `.sessions` 也禁止访问。会话、最终用户/助手消息、上传文件信息和消息—文件关系存于 `server/.data/demo-agent.sqlite3`；每轮 Chat 根据 `session_id` 与 `parent_message_id` 从 SQLite 还原当前消息链，再临时投影成 Chat Completions `items`。历史接口按本轮用户消息关联 `agent_turns` 与 `tool_runs`，在对应助手回复下展示工具名称、耗时及参数/结果短文本（最多约 500 字）；实时事件仍有完整结果。历史账本不记录工具与正文的交错位置，故历史界面在正文前展示工具卡片；模型上下文仍只使用最终用户/助手文本。
+文件工具的根目录限定在 `server/` 内——Agent 读写不到 `web/` 与仓库根，`.env`、`.git` 与 `.sessions` 也禁止访问。会话、最终用户/助手消息、上传文件信息和消息—文件关系存于 `server/.data/demo-agent.sqlite3`；每轮 Chat 根据 `session_id` 与 `parent_message_id` 从 SQLite 还原当前消息链，再临时投影成 Chat Completions `items`。历史接口按本轮用户消息关联 `agent_turns` 与 `tool_runs`，在对应助手回复下展示工具名称、耗时及参数/结果短文本（最多约 500 字）；实时事件仍有完整结果。历史账本不记录工具与正文的交错位置，故历史界面在正文前展示工具卡片；模型上下文使用会话摘要与近期用户/助手原文，不把工具账本当成消息。
 
 现有工具：
 
@@ -194,7 +194,7 @@ demo-agent/
 - `tools/calculate.py` 用 `eval()` 执行模型给的表达式，等于任意代码执行；权限与审批机制移除后模型无需确认即可触发，仅适用于本地学习，不能上线
 - **prompt injection 未真正防住**：`web_search` / `fetch_url` 引入的外部内容可能夹带指令，且现在没有任何写入前确认，模型可能被诱导改写文件
 - `write_file` 无确认直接覆盖文件，没有备份或事务，也还没有“读取外部内容后禁止写入”等隔离
-- 上下文长度控制目前只有纯截断（`agent/context_budget.py`，`len(text)` 一字一 token 保守估算、预算 24K、system 永在、至少保留最新一条）；被截掉的早期历史对模型不可见，滚动摘要尚未实现
+- 上下文使用 `len(text)` 估算预算；滚动摘要可能逐次蒸馏损失早期细节。摘要失败期间只对游标后的原话做截断，未收编的中间段暂时不可见；原始消息仍在 SQLite。单条待收编原文超过单次收编预算时，本轮跳过摘要且游标不动；需调高 `SUMMARY_ABSORB_BUDGET` 才能收编该条。
 - 没有应用层重试策略；模型请求或流处理异常会转成 `error` 事件，但中断的任务不会自动续跑。可观测性埋点已上线（`agent/metrics.py` + `agent_turns`/`tool_runs` 表 + `chat_messages.meta`）：每轮记录模型请求耗时、流式 usage（智谱接口已验证支持 `include_usage`）与工具执行名/耗时/成败，落库失败只记日志不影响回复；stats 查询接口已上线（GET /api/sessions/{id}/stats 现场聚合），前端已展示会话 stats 和工具执行耗时
 - 300 秒整轮时限只在模型 chunk 边界与工具执行前后检查；已进入阻塞的工具调用无法被强行抢占，超时要等调用返回后才生效
 - HTTP 聊天用进程内标志与锁阻止并发运行；多 worker 或多进程部署不受支持
@@ -203,7 +203,17 @@ demo-agent/
 
 ### 1. 上下文控制
 
-截断已上线（`agent/context_budget.py`：预算 24K、system 永在、至少保留最新一条）。滚动摘要和压缩分隔线留待下一 PR；工具过程历史展示读取 `tool_runs`，模型上下文仍只有最终用户/助手文本。
+`agent/context_budget.py` 保留 system + 会话级滚动摘要 + 游标后的近期原话。以下配置均可在 `server/.env` 中设为正整数，留空使用默认值（示例见 `server/.env.example`）：
+
+| 配置 | 默认值 | 用途 |
+|---|---:|---|
+| `CONTEXT_BUDGET` | 24000 字符 | 模型上下文预算，超限时裁掉最旧的未收编原话 |
+| `SUMMARY_ROLL_TRIGGER` | 12000 字符 | 未摘要原文超过此值后尝试摘要 |
+| `SUMMARY_RECENT_BUDGET` | 8000 字符 | 保留最近原文；建议触发线高于此值 |
+| `SUMMARY_ABSORB_BUDGET` | 8000 字符 | 单次收编上限；单条超限时不推进游标 |
+| `SUMMARY_MAX_TOKENS` | 2000 token | 摘要模型单次输出上限 |
+
+回复成功后，在旁路线程中滚动收编较早消息；摘要模型返回的完整新摘要和游标原子更新，失败不推进游标，下轮重试。历史接口返回摘要与游标，前端在已收编原文的末尾显示压缩分隔线；原文仍照常展示。摘要生成是异步的，当前页可能要等下次历史加载才显示新分隔线。工具过程历史展示继续读取 `tool_runs`。
 
 ### 2. 并发与会话存储
 

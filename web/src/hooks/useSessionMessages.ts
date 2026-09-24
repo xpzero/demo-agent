@@ -13,6 +13,7 @@ type HistoryState = {
 /** 唯一的消息数组所有者：加载当前会话并同步后续聊天使用的父消息指针。 */
 export function useSessionMessages(sessionId: string, sessionGeneration: number) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [summaryCursor, setSummaryCursor] = useState<number | null>(null);
   const [state, setState] = useState<HistoryState>({ generation: -1, status: "loading", error: "" });
   const [retryCount, setRetryCount] = useState(0);
   const setCurrentMessageId = useSessionStore((store) => store.setCurrentMessageId);
@@ -20,6 +21,7 @@ export function useSessionMessages(sessionId: string, sessionGeneration: number)
   useEffect(() => {
     const controller = new AbortController();
     setMessages([]);
+    setSummaryCursor(null);
     setState({ generation: sessionGeneration, status: "loading", error: "" });
 
     if (useSessionStore.getState().isNewSession) {
@@ -34,6 +36,7 @@ export function useSessionMessages(sessionId: string, sessionGeneration: number)
           throw new Error("会话不存在");
         }
         setCurrentMessageId(history.session.current_message_id);
+        setSummaryCursor(history.session.summary_upto_message_id);
         setMessages(historyToMessages(history.messages));
         setState({ generation: sessionGeneration, status: "ready", error: "" });
       }).catch((cause: unknown) => {
@@ -55,6 +58,8 @@ export function useSessionMessages(sessionId: string, sessionGeneration: number)
   const historyReady = current && state.status === "ready";
   return {
     messages: historyReady ? messages : [],
+    summaryCursor: historyReady ? summaryCursor : null,
+    setSummaryCursor,
     setMessages,
     historyReady,
     loadingHistory: !current || state.status === "loading",

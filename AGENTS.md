@@ -126,7 +126,7 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 
 ## 会话格式与并发
 
-- Session、最终用户/助手消息、上传文件与消息附件关系持久化于 SQLite；Chat 根据父消息链临时构造以 system message 开始的 `items`。
+- Session、最终用户/助手消息、上传文件与消息附件关系持久化于 SQLite；Chat 根据父消息链临时构造以 system message 开始的 `items`。`chat_sessions.summary` 与 `summary_upto_message_id` 是单份可重建的会话摘要和游标；原文仍完整保留。构造上下文时游标以前由摘要代言，之后按预算保留近期原话；done 后异步滚动，失败不推进游标。
 - 工具调用和工具结果仍只属于本轮临时模型 `items`；历史界面按用户消息关联 `tool_runs` 的短文本，在对应回复的正文前显示工具卡片，不作为模型消息链的独立节点，也不承诺恢复实时文本与工具的交错顺序。不得把它们拆成只有调用、没有结果的半截上下文。
 - `user_message` SSE 先返回已持久化用户消息 ID；`done` 携带助手消息 ID。错误或客户端取消后用户消息可能保留，下一轮应以该 ID 为父节点。
 - `api.py` 用进程内集合与锁阻止同一 Session 并发 Chat；进程内锁不解决多 worker 或多进程竞争，不要描述为跨进程安全。

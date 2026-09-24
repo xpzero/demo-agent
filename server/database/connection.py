@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     current_message_id INTEGER,
+    summary TEXT,
+    summary_upto_message_id INTEGER,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     FOREIGN KEY (current_message_id)
