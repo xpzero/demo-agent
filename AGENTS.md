@@ -56,7 +56,7 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 
 - `server/agent/`：智谱（OpenAI 兼容）客户端配置与唯一 Agent 内核。
 - `server/tools/`：工具 schema、实现、注册和执行分发。
-- `server/api.py`：FastAPI 路由、进程内会话运行保护、CORS 和项目事件到 SSE 的传输映射；`server/database/` 持久化 Session/Message/File。
+- `server/api.py`：FastAPI 路由、进程内会话运行保护、CORS 和项目事件到 SSE 的传输映射；`server/chat_stream.py` 承担一轮 Chat 的流式编排（事件循环、done 落库、埋点落库）；`server/database/` 持久化 Session/Message/File。
 - `web/src/adapter/`：HTTP 请求、SSE 分帧与项目事件类型定义，不依赖任何 UI 框架。`types.ts` 是事件类型，`transport.ts` 是 API 地址、请求错误与 SSE 分帧，`index.ts` 是聊天请求与公共导出。
 - `web/src/App.tsx`：界面组合层；`web/src/chat/` 管理前端消息模型与纯函数，`web/src/hooks/` 管理请求与状态，展示逻辑与 `adapter/` 保持分离。
 
