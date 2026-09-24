@@ -67,6 +67,56 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(history["session"]["current_message_id"], messages[1]["id"])
         self.assertEqual(self.client.get("/api/sessions").json()["sessions"][0]["id"], self.session_id)
 
+    def test_tool_runs_survive_history_reload(self):
+        display = [
+            {"type": "text_delta", "text": "先查"},
+            {"type": "tool_call", "id": "call_1", "name": "get_weather", "args": {"city": "北京"}},
+            {"type": "tool_result", "id": "call_1", "content": "晴", "elapsed": 98.0},
+            {"type": "text_delta", "text": "今天晴"},
+        ]
+        def fake_stream(items, context=None, recorder=None):
+            from agent.metrics import ToolRecord
+            assert recorder is not None
+            turn = recorder.start_turn()
+            for event in display:
+                if event["type"] == "tool_result":
+                    turn.tools.append(ToolRecord(
+                        name="get_weather", args_excerpt="{'city': '北京'}",
+                        result_excerpt="晴", duration_ms=98.0, ok=True,
+                    ))
+                yield event
+            yield {"type": "done", "content": "今天晴"}
+
+        with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
+            response = self.client.post("/api/chat", json=self.payload())
+        self.assertEqual(response.status_code, 200)
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        runs = history["messages"][1]["tool_runs"]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["name"], "get_weather")
+        self.assertEqual(runs[0]["args_excerpt"], "{'city': '北京'}")
+        self.assertEqual(runs[0]["result_excerpt"], "晴")
+        self.assertEqual(runs[0]["duration_ms"], 98.0)
+        self.assertEqual(history["messages"][1]["content"], "今天晴")
+        self.assertEqual(self.database.get_message_chain(self.session_id, history["messages"][1]["id"])[-1]["content"], "今天晴")
+
+    def test_tool_runs_follow_their_user_turn_even_without_assistant_text(self):
+        from agent.metrics import ToolRecord
+
+        def fake_stream(items, context=None, recorder=None):
+            turn = recorder.start_turn()
+            turn.tools.append(ToolRecord(
+                name="get_weather", args_excerpt="{}", result_excerpt="晴",
+                duration_ms=12, ok=True,
+            ))
+            yield {"type": "done", "content": ""}
+
+        with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
+            self.client.post("/api/chat", json=self.payload())
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        self.assertEqual(history["messages"][1]["tool_runs"][0]["name"], "get_weather")
+        self.assertEqual(history["messages"][1]["content"], "")
+
     def test_stale_parent_is_rejected(self):
         first = self.database.create_user_turn(
             session_id=self.session_id,
@@ -279,3 +329,58 @@ class ChatApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionStatsApiTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.directory.name) / "test.sqlite3"
+        self.patches = [
+            patch.object(api.deps, "DATABASE_PATH", self.database_path),
+        ]
+        for item in self.patches:
+            item.start()
+        self.database = Database(self.database_path)
+        self.database.initialize()
+        self.client = TestClient(api.app)
+        self.session_id = str(uuid4())
+        self.user_id = self.database.create_user_turn(
+            session_id=self.session_id,
+            parent_message_id=None,
+            content="你好",
+            file_ids=[],
+        )
+
+    def tearDown(self):
+        for item in reversed(self.patches):
+            item.stop()
+        self.directory.cleanup()
+
+    def test_stats_endpoint_returns_aggregates(self):
+        self.database.record_agent_turns(
+            message_id=self.user_id,
+            turns=[
+                {
+                    "duration_ms": 100.0,
+                    "prompt_tokens": 50,
+                    "completion_tokens": 10,
+                    "estimated_prompt_tokens": 50,
+                    "estimated_completion_tokens": 10,
+                    "tools": [],
+                }
+            ],
+        )
+        response = self.client.get(f"/api/sessions/{self.session_id}/stats")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["turns"], 1)
+        self.assertEqual(body["total_prompt_tokens"], 50)
+        self.assertFalse(body["estimated"])
+
+    def test_stats_for_unknown_session_is_404(self):
+        response = self.client.get(f"/api/sessions/{uuid4()}/stats")
+        self.assertEqual(response.status_code, 404)
+
+    def test_stats_for_invalid_uuid_is_400(self):
+        response = self.client.get("/api/sessions/not-a-uuid/stats")
+        self.assertEqual(response.status_code, 400)

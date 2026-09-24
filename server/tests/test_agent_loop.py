@@ -1,7 +1,7 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, call, patch
+from unittest.mock import ANY, Mock, call, patch
 
 
 # agent.client constructs the SDK client at import time. Unit tests never make a
@@ -192,14 +192,14 @@ class StreamEventsTests(unittest.TestCase):
                     "name": "calculate",
                     "args": {"expression": "1+2"},
                 },
-                {"type": "tool_result", "id": "call_add", "content": "3"},
+                {"type": "tool_result", "id": "call_add", "content": "3", "elapsed": ANY},
                 {
                     "type": "tool_call",
                     "id": "call_multiply",
                     "name": "calculate",
                     "args": {"expression": "2*3"},
                 },
-                {"type": "tool_result", "id": "call_multiply", "content": "6"},
+                {"type": "tool_result", "id": "call_multiply", "content": "6", "elapsed": ANY},
                 {"type": "text_delta", "text": "答案是 3 和 6"},
                 {"type": "done", "content": "答案是 3 和 6"},
             ],
@@ -225,6 +225,18 @@ class StreamEventsTests(unittest.TestCase):
                 call("calculate", {"expression": "2*3"}, None),
             ]
         )
+
+    def test_tool_result_carries_elapsed_ms(self):
+        # P0-2 前端三件套：tool_result 事件带 elapsed（毫秒），
+        # 供前端工具卡片显示耗时
+        items = [{"role": "user", "content": "hello"}]
+        stream = [[tool_delta(0, call_id="call_1", name="get_weather", arguments='{"city":"北京"}')]]
+        # deadline、轮前、模型起点、流中、工具前、工具起点、工具后、耗时终点、下一轮。
+        with patch.object(loop.time, "monotonic", side_effect=[0, 1, 2, 3, 4, 5, 5.05, 5.098, 7]):
+            events, _, execute = self.run_with_streams(items, stream, tool_results=["晴"])
+        results = [event for event in events if event["type"] == "tool_result"]
+        self.assertEqual(len(results), 1)
+        self.assertAlmostEqual(results[0]["elapsed"], 98.0)
 
     def test_tool_calls_stop_at_max_turns(self):
         items = [{"role": "user", "content": "keep calling"}]

@@ -3,6 +3,7 @@
 import json
 
 from .connection import StoreError
+from .sessions import normalize_session_id
 
 METRICS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS agent_turns (
@@ -110,6 +111,52 @@ class MetricsStoreMixin:
                             now,
                         ),
                     )
+
+    def get_session_stats(self, session_id: str) -> dict:
+        """会话级观测汇总：对 agent_turns 现场 SUM 聚合，不存累计数。
+
+        账本是唯一事实来源，能推导的数据不冗余存。
+        - total_*：只累计有实测 usage 的行；
+        - estimated_*：展示口径，每行优先实测，缺失时用估算补位；
+        - estimated：任一行有缺失实测即 True。
+        """
+        session_id = normalize_session_id(session_id)
+        with self.connection() as connection:
+            session = connection.execute(
+                "SELECT id FROM chat_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if session is None:
+                raise StoreError("session_not_found", "会话不存在", 404)
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS turns,
+                    COALESCE(SUM(prompt_tokens), 0) AS total_prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0)
+                        AS total_completion_tokens,
+                    COALESCE(SUM(COALESCE(prompt_tokens, estimated_prompt_tokens)), 0)
+                        AS estimated_prompt_tokens,
+                    COALESCE(SUM(COALESCE(completion_tokens, estimated_completion_tokens)), 0)
+                        AS estimated_completion_tokens,
+                    SUM(prompt_tokens IS NULL OR completion_tokens IS NULL)
+                        AS missing_usage
+                FROM agent_turns
+                WHERE message_id IN (
+                    SELECT id FROM chat_messages WHERE session_id = ?
+                )
+                """,
+                (session_id,),
+            ).fetchone()
+        missing = row["missing_usage"] or 0
+        return {
+            "turns": row["turns"],
+            "total_prompt_tokens": row["total_prompt_tokens"],
+            "total_completion_tokens": row["total_completion_tokens"],
+            "estimated_prompt_tokens": row["estimated_prompt_tokens"],
+            "estimated_completion_tokens": row["estimated_completion_tokens"],
+            # 任一用量缺实测即标记；零账（空会话）不算 estimated
+            "estimated": bool(missing),
+        }
 
     def set_message_meta(self, message_id: int, meta: dict) -> None:
         """把汇总观测数据挂到助手消息的 meta 挂牌（JSON 列）。"""

@@ -33,7 +33,7 @@ export default function MessageMeta({ message }: { message: ChatMessage }) {
   const date = new Date(message.createdAt * 1000);
 
   return (
-    <MessageFooter className="gap-1 px-0 text-muted-foreground">
+    <MessageFooter className="gap-1 px-0 text-muted-foreground opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 max-md:opacity-100">
       <time dateTime={date.toISOString()}>{dateTimeFormat.format(date)}</time>
       {text && (
         <Tooltip>

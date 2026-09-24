@@ -92,6 +92,19 @@ def get_session(session_id: str):
     return history
 
 
+@app.get("/api/sessions/{session_id}/stats")
+def get_session_stats(session_id: str):
+    database = get_database()
+    try:
+        session_id = database.normalize_session_id(session_id)
+    except StoreError as error:
+        raise _http_error(error) from error
+    try:
+        return database.get_session_stats(session_id)
+    except StoreError as error:
+        raise _http_error(error) from error
+
+
 @app.post("/api/chat")
 def chat(body: ChatRequest):
     database = get_database()

@@ -17,6 +17,8 @@ export type SessionMessage = {
   role: "user" | "assistant";
   status: string;
   content: string;
+  /** 按本轮用户消息关联的工具账本（仅含存档短文本）。 */
+  tool_runs?: { id: number; name: string; args_excerpt: string; result_excerpt: string; duration_ms: number | null }[];
   created_at: number;
   files: { id: string; filename: string }[];
 };
@@ -25,6 +27,34 @@ export type SessionHistory = {
   session: SessionSummary;
   messages: SessionMessage[];
 };
+
+/** 会话级观测汇总（GET /api/sessions/{id}/stats 现场聚合）。 */
+export type SessionStats = {
+  turns: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  estimated_prompt_tokens: number;
+  estimated_completion_tokens: number;
+  estimated: boolean;
+};
+
+/** 拉取会话观测汇总；会话不存在返回 null。 */
+export async function getSessionStats(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<SessionStats | null> {
+  const response = await fetch(
+    `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/stats`,
+    { signal },
+  );
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw await responseError(response);
+  }
+  return (await response.json()) as SessionStats;
+}
 
 export async function listSessions(signal?: AbortSignal): Promise<SessionSummary[]> {
   const response = await fetch(`${API_BASE}/api/sessions`, { signal });

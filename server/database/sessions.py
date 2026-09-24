@@ -240,6 +240,17 @@ class SessionStoreMixin:
                     (row["id"],),
                 ).fetchall()
                 message = dict(row)
+                if row["role"] == "assistant" and row["parent_id"] is not None:
+                    runs = connection.execute(
+                        """SELECT tool_runs.id, tool_runs.name, tool_runs.args_excerpt,
+                                  tool_runs.result_excerpt, tool_runs.duration_ms
+                           FROM tool_runs JOIN agent_turns
+                             ON agent_turns.id = tool_runs.agent_turn_id
+                           WHERE agent_turns.message_id = ?
+                           ORDER BY agent_turns.id, tool_runs.id""",
+                        (row["parent_id"],),
+                    ).fetchall()
+                    message["tool_runs"] = [dict(run) for run in runs]
                 message["files"] = [dict(file_row) for file_row in files]
                 messages.append(message)
         return {"session": dict(session), "messages": messages}
