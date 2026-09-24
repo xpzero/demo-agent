@@ -9,6 +9,7 @@ from uuid import uuid4
 os.environ.setdefault("API_KEY", "test-key")
 
 import api  # noqa: E402
+from api import chat_stream  # noqa: E402
 from database import Database  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -19,8 +20,8 @@ class ChatApiTests(unittest.TestCase):
         self.database_path = Path(self.directory.name) / "test.sqlite3"
         self.root = Path(self.directory.name) / "files"
         self.patches = [
-            patch.object(api, "DATABASE_PATH", self.database_path),
-            patch.object(api, "FILE_ROOT", self.root),
+            patch.object(api.deps, "DATABASE_PATH", self.database_path),
+            patch.object(api.deps, "FILE_ROOT", self.root),
         ]
         for item in self.patches:
             item.start()
@@ -48,7 +49,7 @@ class ChatApiTests(unittest.TestCase):
         return [json.loads(frame.removeprefix("data: ")) for frame in response.text.strip().split("\n\n")]
 
     def test_first_chat_creates_session_and_persists_assistant(self):
-        with patch.object(api, "stream_events", return_value=iter([
+        with patch.object(chat_stream, "stream_events", return_value=iter([
             {"type": "text_delta", "text": "你好"},
             {"type": "done", "content": "你好"},
         ])):
@@ -97,11 +98,11 @@ class ChatApiTests(unittest.TestCase):
         )
         seen = []
 
-        def stream(items, context=None):
+        def stream(items, context=None, recorder=None):
             seen.extend(items)
             yield {"type": "done", "content": "second answer"}
 
-        with patch.object(api, "stream_events", side_effect=stream):
+        with patch.object(chat_stream, "stream_events", side_effect=stream):
             response = self.client.post("/api/chat", json=self.payload(parent_message_id=assistant, message="second"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual([item["role"] for item in seen], ["system", "user", "assistant", "user"])
@@ -119,7 +120,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(api._running_sessions, set())
 
     def test_failed_stream_keeps_user_message_as_parent(self):
-        with patch.object(api, "stream_events", return_value=iter([
+        with patch.object(chat_stream, "stream_events", return_value=iter([
             {"type": "error", "message": "gateway failed"},
         ])):
             response = self.client.post("/api/chat", json=self.payload())
@@ -133,7 +134,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(api._running_sessions, set())
 
     def test_stream_without_terminal_event_emits_error_and_releases_session(self):
-        with patch.object(api, "stream_events", return_value=iter([
+        with patch.object(chat_stream, "stream_events", return_value=iter([
             {"type": "text_delta", "text": "partial"},
         ])):
             response = self.client.post("/api/chat", json=self.payload())
@@ -144,7 +145,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(api._running_sessions, set())
 
     def test_max_turns_ends_with_error_and_releases_session(self):
-        with patch.object(api, "stream_events", return_value=iter([
+        with patch.object(chat_stream, "stream_events", return_value=iter([
             {"type": "max_turns"},
         ])):
             response = self.client.post("/api/chat", json=self.payload())
@@ -155,11 +156,10 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(api._running_sessions, set())
 
     def test_stream_exception_emits_error_and_releases_session(self):
-        def broken(_items, context=None):
+        def broken(_items, context=None, recorder=None):
             yield {"type": "text_delta", "text": "partial"}
             raise RuntimeError("stream interrupted")
-
-        with patch.object(api, "stream_events", side_effect=broken):
+        with patch.object(chat_stream, "stream_events", side_effect=broken):
             response = self.client.post("/api/chat", json=self.payload())
         self.assertEqual(
             [event["type"] for event in self.events(response)],
@@ -169,7 +169,7 @@ class ChatApiTests(unittest.TestCase):
 
     def test_assistant_persistence_failure_emits_error_not_done(self):
         with patch.object(Database, "add_assistant_message", side_effect=RuntimeError("write failed")):
-            with patch.object(api, "stream_events", return_value=iter([
+            with patch.object(chat_stream, "stream_events", return_value=iter([
                 {"type": "done", "content": "answer"},
             ])):
                 response = self.client.post("/api/chat", json=self.payload())
@@ -189,7 +189,7 @@ class ChatApiTests(unittest.TestCase):
         uploaded = self.client.post(
             "/api/documents", files={"file": ("report.pdf", b"%PDF-content", "application/pdf")}
         ).json()
-        with patch.object(api, "stream_events", return_value=iter([{"type": "done", "content": "ok"}])):
+        with patch.object(chat_stream, "stream_events", return_value=iter([{"type": "done", "content": "ok"}])):
             response = self.client.post("/api/chat", json=self.payload(ref_file_ids=[uploaded["file_id"]]))
         self.assertEqual(response.status_code, 200)
         messages = self.client.get(f"/api/sessions/{self.session_id}").json()["messages"]
@@ -200,6 +200,81 @@ class ChatApiTests(unittest.TestCase):
         ))
         self.assertEqual(response.status_code, 409)
         self.assertEqual(self.client.get(f"/api/sessions/{other_session}").status_code, 404)
+
+
+    def test_metrics_persisted_after_done(self):
+        # P0-2 集成：done 后 agent_turns 锚用户消息、meta 挂助手消息
+        def fake_stream(items, context=None, recorder=None):
+            from agent.metrics import ToolRecord
+
+            turn = recorder.start_turn()
+            turn.duration_ms = 123.0
+            turn.usage = {"prompt_tokens": 100, "completion_tokens": 20}
+            turn.tools.append(
+                ToolRecord(
+                    name="get_weather",
+                    args_excerpt='{"city": "北京"}',
+                    result_excerpt="晴",
+                    duration_ms=5.0,
+                    ok=True,
+                )
+            )
+            yield {"type": "done", "content": "answer"}
+
+        with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
+            response = self.client.post("/api/chat", json=self.payload())
+        self.assertEqual(response.status_code, 200)
+
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        user_id, assistant_id = (
+            history["messages"][0]["id"],
+            history["messages"][1]["id"],
+        )
+        with self.database.connection() as connection:
+            turns = connection.execute(
+                "SELECT * FROM agent_turns"
+            ).fetchall()
+            runs = connection.execute("SELECT * FROM tool_runs").fetchall()
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0]["message_id"], user_id)
+        self.assertEqual(turns[0]["prompt_tokens"], 100)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["name"], "get_weather")
+        self.assertEqual(runs[0]["ok"], 1)
+        meta = self.database.get_message_meta(assistant_id)
+        self.assertEqual(meta["turns"], 1)
+        self.assertEqual(meta["prompt_tokens"], 100)
+        self.assertFalse(meta["estimated"])
+
+    def test_metrics_persisted_even_on_error(self):
+        # 中途失败的轮也要留账：账本锚用户消息（轮开始前已存在）
+        def fake_stream(items, context=None, recorder=None):
+            recorder.start_turn()
+            yield {"type": "error", "message": "boom"}
+
+        with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
+            response = self.client.post("/api/chat", json=self.payload())
+        self.assertEqual(response.status_code, 200)
+        with self.database.connection() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) AS n FROM agent_turns"
+            ).fetchone()["n"]
+        self.assertEqual(count, 1)
+
+    def test_metrics_persistence_failure_does_not_break_reply(self):
+        # 落库失败只记日志：SSE 正常收尾，不向用户报错
+        def fake_stream(items, context=None, recorder=None):
+            recorder.start_turn()
+            yield {"type": "done", "content": "answer"}
+
+        with patch.object(
+            Database, "record_agent_turns", side_effect=RuntimeError("db down")
+        ):
+            with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
+                response = self.client.post("/api/chat", json=self.payload())
+        events = self.events(response)
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual(api._running_sessions, set())
 
 
 if __name__ == "__main__":

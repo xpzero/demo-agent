@@ -1,6 +1,6 @@
-import logging
+"""HTTP 路由：documents / sessions / chat（stats 接口将来也落这里）。"""
+
 from contextlib import asynccontextmanager
-from threading import Lock
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,32 +10,20 @@ from starlette.background import BackgroundTask
 
 from agent import SYSTEM_PROMPT
 from agent.context_budget import build_context
-from chat_stream import chat_sse_stream
-from database import DATABASE_PATH as DEFAULT_DATABASE_PATH
-from database import Database, StoreError
-from documents import FILE_ROOT as DEFAULT_FILE_ROOT
+from database import StoreError
 from documents import MAX_FILE_BYTES, FileUploadError, save_pdf
 from documents.cleanup import cleanup_files
-from logging_setup import setup_logging
+from tools.context import SessionContext  # noqa: F401  re-export for readability
 
-setup_logging()
-
-DATABASE_PATH = DEFAULT_DATABASE_PATH
-FILE_ROOT = DEFAULT_FILE_ROOT
-_running_sessions: set[str] = set()
-_lock = Lock()
-
-
-def get_database() -> Database:
-    database = Database(DATABASE_PATH)
-    database.initialize()
-    return database
+from .chat_stream import chat_sse_stream
+from . import deps
+from .deps import _lock, _running_sessions, get_database
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     database = get_database()
-    cleanup_files(database=database, root=FILE_ROOT)
+    cleanup_files(database=database, root=deps.FILE_ROOT)
     yield
 
 
@@ -76,7 +64,7 @@ async def upload_file(file: UploadFile = File(...)):
         return await save_pdf(
             file,
             database=get_database(),
-            root=FILE_ROOT,
+            root=deps.FILE_ROOT,
             max_bytes=MAX_FILE_BYTES,
         )
     except FileUploadError as error:
@@ -152,7 +140,7 @@ def chat(body: ChatRequest):
             session_id=session_id,
             user_message_id=user_message_id,
             items=items,
-            file_root=FILE_ROOT,
+            file_root=deps.FILE_ROOT,
             release_session=release_session,
         ),
         media_type="text/event-stream",

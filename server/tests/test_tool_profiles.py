@@ -25,11 +25,12 @@ class ToolProfileTests(unittest.TestCase):
         _, handlers = tools.build_registry("public")
 
         with patch.dict(tools.TOOL_HANDLERS, handlers, clear=True):
-            result = tools.execute_tool(
+            output, ok = tools.execute_tool(
                 "write_file", {"path": "unsafe.txt", "content": "x"}
             )
 
-        self.assertEqual(result, "未知工具：write_file")
+        self.assertEqual(output, "未知工具：write_file")
+        self.assertFalse(ok)
 
     def test_local_profile_keeps_teaching_tools(self):
         schemas, handlers = tools.build_registry("local")

@@ -17,8 +17,8 @@ class DocumentUploadApiTests(unittest.TestCase):
         self.root = Path(self.directory.name) / "files"
         self.database_path = Path(self.directory.name) / "test.sqlite3"
         self.patches = [
-            patch.object(api, "FILE_ROOT", self.root),
-            patch.object(api, "DATABASE_PATH", self.database_path),
+            patch.object(api.deps, "FILE_ROOT", self.root),
+            patch.object(api.deps, "DATABASE_PATH", self.database_path),
         ]
         for item in self.patches:
             item.start()
@@ -76,7 +76,7 @@ class DocumentUploadApiTests(unittest.TestCase):
             self.upload("empty.pdf", b"").json()["detail"]["code"],
             "empty_file",
         )
-        with patch.object(api, "MAX_FILE_BYTES", 8):
+        with patch.object(api.routes, "MAX_FILE_BYTES", 8):
             response = self.upload("big.pdf", b"%PDF-123456")
         self.assertEqual(response.status_code, 413)
         self.assertEqual(response.json()["detail"]["code"], "file_too_large")

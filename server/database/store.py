@@ -2,10 +2,15 @@
 
 from .connection import ConnectionMixin
 from .files import FileStoreMixin
+from .metrics import MetricsStoreMixin
 from .sessions import SessionStoreMixin
 
 __all__ = ["Database"]
 
 
-class Database(ConnectionMixin, SessionStoreMixin, FileStoreMixin):
+class Database(ConnectionMixin, SessionStoreMixin, FileStoreMixin, MetricsStoreMixin):
     """SQLite 数据访问门面：对外保持 database.xxx() 调用面不变。"""
+
+    def initialize(self) -> None:
+        super().initialize()
+        self.initialize_metrics()

@@ -35,19 +35,23 @@ def build_registry(profile: str) -> tuple[list[dict], dict]:
 TOOLS, TOOL_HANDLERS = build_registry(TOOL_PROFILE)
 
 
-def execute_tool(name: str, args: dict, context: SessionContext | None = None) -> str:
+def execute_tool(
+    name: str, args: dict, context: SessionContext | None = None
+) -> tuple[str, bool]:
     """按名字分发到具体工具，并把异常统一转成文本结果。
 
-    args 由模型生成，属于不可信输入：字段缺失、路径越界、表达式非法都有可能。
-    这里兜住所有异常并把错误信息回传给模型，它就有机会自行纠正后重试，
-    而不是让整个 agent 循环直接崩掉。context 携带本轮会话信息，
-    供需要定位会话附件的工具使用；无会话上下文的调用方不传即可。
+    返回 (output, ok) 二元组：ok 显式标记成败（异常/未知工具为 False），
+    不靠调用方去猜字符串前缀。args 由模型生成，属于不可信输入：
+    字段缺失、路径越界、表达式非法都有可能。这里兜住所有异常并把
+    错误信息回传给模型，它就有机会自行纠正后重试，而不是让整个
+    agent 循环直接崩掉。context 携带本轮会话信息，供需要定位会话
+    附件的工具使用；无会话上下文的调用方不传即可。
     """
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
-        return f"未知工具：{name}"
+        return f"未知工具：{name}", False
 
     try:
-        return handler(args, context)
+        return handler(args, context), True
     except Exception as e:
-        return f"{name} 执行出错：{e}"
+        return f"{name} 执行出错：{e}", False

@@ -174,20 +174,22 @@ class ParseAttachedDocumentTests(unittest.TestCase):
         self.assertIn("没有关联的上传附件", result)
 
     def test_missing_context_is_rejected(self):
-        result = execute_tool("parse_attached_document", {})
+        output, ok = execute_tool("parse_attached_document", {})
 
-        self.assertIn("执行出错", result)
-        self.assertIn("缺少会话上下文", result)
+        self.assertFalse(ok)
+        self.assertIn("执行出错", output)
+        self.assertIn("缺少会话上下文", output)
 
     def test_corrupt_pdf_becomes_readable_tool_error(self):
         self.attach_pdf(b"%PDF-1.4\nnot a real pdf body")
 
-        result = execute_tool(
+        output, ok = execute_tool(
             "parse_attached_document", {}, self.context
         )
 
-        self.assertIn("执行出错", result)
-        self.assertIn("文件损坏或格式不合法", result)
+        self.assertFalse(ok)
+        self.assertIn("执行出错", output)
+        self.assertIn("文件损坏或格式不合法", output)
 
     def test_multiple_attachments_parse_most_recent_with_note(self):
         self.attach_pdf(build_pdf(["old doc"]), filename="old.pdf")
