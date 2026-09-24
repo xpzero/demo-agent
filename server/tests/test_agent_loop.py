@@ -57,7 +57,14 @@ class StreamEventsTests(unittest.TestCase):
     def run_with_streams(self, items, streams, *, max_turns=10, tool_results=None):
         chat = RecordingChat(streams)
         fake_client = SimpleNamespace(chat=SimpleNamespace(completions=chat))
-        execute = Mock(side_effect=tool_results) if tool_results is not None else Mock()
+        # execute_tool 现返回 (output, ok) 二元组；调用方仍按旧习惯
+        # 传纯字符串结果列表，这里统一包装成成功二元组
+        if tool_results is not None:
+            execute = Mock(
+                side_effect=[(result, True) for result in tool_results]
+            )
+        else:
+            execute = Mock(return_value=("", True))
 
         with (
             patch.object(loop, "client", fake_client),
@@ -247,7 +254,8 @@ class StreamEventsTests(unittest.TestCase):
 
     def test_slow_model_stream_becomes_timeout_error(self):
         items = [{"role": "user", "content": "hello"}]
-        with patch.object(loop.time, "monotonic", side_effect=[0, 1, 301]):
+        # 序列: deadline=0, 轮前检查=1, 计时起点=2, 流中检查=301 → 超时
+        with patch.object(loop.time, "monotonic", side_effect=[0, 1, 2, 301]):
             events, _, execute = self.run_with_streams(items, [[text_delta("late")]])
         self.assertEqual(events, [{"type": "error", "message": "TimeoutError: 本轮回复超时，请重试"}])
         execute.assert_not_called()
@@ -255,7 +263,9 @@ class StreamEventsTests(unittest.TestCase):
     def test_slow_tool_does_not_start_next_model_request(self):
         items = [{"role": "user", "content": "hello"}]
         stream = [[tool_delta(0, call_id="call_1", name="get_weather", arguments='{"city":"北京"}')]]
-        with patch.object(loop.time, "monotonic", side_effect=[0, 1, 2, 3, 301]):
+        # 序列: deadline=0, 轮前检查=1, 计时起点=2, 流中检查=3,
+        # 工具前检查=4, 工具计时起点=5, 工具后检查=301 → 超时
+        with patch.object(loop.time, "monotonic", side_effect=[0, 1, 2, 3, 4, 5, 301]):
             events, requests, execute = self.run_with_streams(items, stream, tool_results=["晴"])
         self.assertEqual([event["type"] for event in events], ["tool_call", "error"])
         self.assertIn("TimeoutError", events[-1]["message"])

@@ -6,6 +6,7 @@ from tools import TOOLS, execute_tool
 from tools.context import SessionContext
 
 from .client import MODEL, client
+from .metrics import ToolRecord, TurnRecorder, excerpt
 
 MAX_RUN_SECONDS = 300
 
@@ -56,15 +57,21 @@ def _merge_tool_call_delta(
 
 
 def _aggregate_stream(
-    stream, text_parts: list[str], partial_tool_calls: dict[int, dict], deadline: float
+    stream, text_parts: list[str], partial_tool_calls: dict[int, dict], deadline: float,
+    current_turn=None,
 ) -> Iterator[dict]:
     """消费模型的 chunk 流：文本增量向外透传，工具调用增量按 index 聚齐。
 
     结果就地写入 text_parts 和 partial_tool_calls，不产生返回值。
+    current_turn 存在时（P0-2 埋点），从最后一个 chunk 提取 usage。
     """
     # 工具调用参数按 chunk 增量到达，必须按 index 聚齐后再解析
     for chunk in stream:
         _check_deadline(deadline)
+        if current_turn is not None:
+            usage = _extract_usage(chunk)
+            if usage:
+                current_turn.usage = usage
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
@@ -113,8 +120,13 @@ def _run_tool_calls(
     items: list,
     deadline: float,
     context: SessionContext | None,
+    current_turn=None,
 ) -> Iterator[dict]:
-    """按模型给出的顺序逐个执行：结果写回 items，tool_call_id 原样复用。"""
+    """按模型给出的顺序逐个执行：结果写回 items，tool_call_id 原样复用。
+
+    current_turn 存在时（P0-2 埋点），每个工具的名/参数副本/结果副本/
+    耗时/成败记入该次模型请求的观测记录；为 None 时零开销。
+    """
     for tool_call, args in tool_calls_with_args:
         _check_deadline(deadline)
         yield {
@@ -123,8 +135,19 @@ def _run_tool_calls(
             "name": tool_call["name"],
             "args": args,
         }
-        tool_output = execute_tool(tool_call["name"], args, context)
+        tool_started = time.monotonic()
+        tool_output, tool_ok = execute_tool(tool_call["name"], args, context)
         _check_deadline(deadline)
+        if current_turn is not None:
+            current_turn.tools.append(
+                ToolRecord(
+                    name=tool_call["name"],
+                    args_excerpt=excerpt(args),
+                    result_excerpt=excerpt(tool_output),
+                    duration_ms=(time.monotonic() - tool_started) * 1000,
+                    ok=tool_ok,
+                )
+            )
         items.append(
             {
                 "role": "tool",
@@ -139,14 +162,35 @@ def _run_tool_calls(
         }
 
 
+def _extract_usage(chunk) -> dict | None:
+    """从流式 chunk 提取 usage（OpenAI 兼容接口在最后一个 chunk 携带）。
+
+    接口不返回时保持 None，由调用方按文本估算并标 estimated。
+    """
+    usage = getattr(chunk, "usage", None)
+    if not usage:
+        return None
+    data = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = getattr(usage, key, None)
+        if isinstance(value, int):
+            data[key] = value
+    return data or None
+
+
 def stream_events(
-    items: list, max_turns: int = 10, context: SessionContext | None = None
+    items: list,
+    max_turns: int = 10,
+    context: SessionContext | None = None,
+    recorder: TurnRecorder | None = None,
 ) -> Iterator[dict]:
     """agent loop 的核心：流式请求模型、执行工具，把过程产出为结构化事件。
 
     items 是 Chat Completions 的 messages 列表，会被原地追加。
     context 携带本轮会话信息，供 parse_attached_document 这类
     需要定位会话附件的工具使用，与事件流本身无关。
+    recorder 携带内存账本（P0-2 埋点）：逐次模型请求的耗时与 usage、
+    每个工具的名/耗时/成败记入其中，落库由调用方决定——loop 不碰库。
     不做任何打印——HTTP 服务是事件流的消费方，这里只负责「发生了什么」，
     怎么呈现由调用方决定。
     """
@@ -154,19 +198,34 @@ def stream_events(
     try:
         for _ in range(max_turns):
             _check_deadline(deadline)
+            current_turn = recorder.start_turn() if recorder is not None else None
+            if current_turn is not None:
+                current_turn.items_snapshot = [
+                    {**item} if isinstance(item, dict) else item
+                    for item in items
+                ]
             stream = client.chat.completions.create(
                 model=MODEL,
                 messages=items,
                 tools=CHAT_TOOLS,
                 stream=True,
+                stream_options={"include_usage": True},
             )
 
             text_parts: list[str] = []
             partial_tool_calls: dict[int, dict] = {}
-            yield from _aggregate_stream(stream, text_parts, partial_tool_calls, deadline)
+            started = time.monotonic()
+            yield from _aggregate_stream(
+                stream, text_parts, partial_tool_calls, deadline,
+                current_turn=current_turn,
+            )
+            if current_turn is not None:
+                current_turn.duration_ms = (time.monotonic() - started) * 1000
 
             if not partial_tool_calls:
                 reply = "".join(text_parts)
+                if current_turn is not None:
+                    current_turn.reply_text = reply
                 # 最终回复也要写回上下文，否则模型下一轮看不到自己说过什么
                 if reply:
                     items.append({"role": "assistant", "content": reply})
@@ -183,7 +242,7 @@ def stream_events(
             items.append(
                 _build_assistant_message("".join(text_parts), tool_calls)
             )
-            yield from _run_tool_calls(tool_calls_with_args, items, deadline, context)
+            yield from _run_tool_calls(tool_calls_with_args, items, deadline, context, current_turn)
 
         yield {"type": "max_turns"}
     except Exception as error:
