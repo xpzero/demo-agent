@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from agent import SYSTEM_PROMPT, stream_events
+from agent.context_budget import build_context
 from database import DATABASE_PATH as DEFAULT_DATABASE_PATH
 from database import Database, StoreError
 from documents import FILE_ROOT as DEFAULT_FILE_ROOT
@@ -135,14 +136,13 @@ def chat(body: ChatRequest):
             raise _http_error(error) from error
         raise
 
-    items = [{"role": "system", "content": SYSTEM_PROMPT}]
+    # 上下文预算控制在 build_context 内：超预算丢最旧历史，
+    # system 永在；库里仍存全量原文（存储 ≠ 上下文）
     session_files = database.list_session_files(session_id)
+    system_prompt = SYSTEM_PROMPT
     if session_files:
-        items[0]["content"] = f"{SYSTEM_PROMPT}\n{ATTACHED_DOCUMENT_RULE}"
-    items.extend(
-        {"role": message["role"], "content": message["content"]}
-        for message in chain
-    )
+        system_prompt = f"{SYSTEM_PROMPT}\n{ATTACHED_DOCUMENT_RULE}"
+    items = build_context(system_prompt, chain)
 
     def release_session():
         with _lock:
