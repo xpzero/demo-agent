@@ -67,7 +67,7 @@ def choose_to_absorb(
     living: list[dict], trigger: int | None = None,
     recent_budget: int | None = None, absorb_budget: int | None = None,
 ) -> list[dict]:
-    """优先收编较早消息；长消息单独成批，待分段摘要后才推进游标。"""
+    """优先收编较早消息；单条超出预算时保留游标等待调整配置。"""
     if trigger is None:
         trigger = config_int("SUMMARY_ROLL_TRIGGER", 12_000)
     if recent_budget is None:
@@ -83,10 +83,7 @@ def choose_to_absorb(
     for row in candidates:
         cost = estimate_tokens(row["content"])
         if used + cost > absorb_budget:
-            if chosen:
-                break
-            # 长消息单独处理，分段摘要成功后才推进整条消息的游标。
-            chosen.append(row)
+            # 不截断单条原文并推进游标；较早消息可先单独收编。
             break
         chosen.append(row)
         used += cost
@@ -136,13 +133,5 @@ def maybe_roll(database, session_id: str, upto_message_id: int) -> bool:
     batch = choose_to_absorb(living)
     if not batch:
         return False
-    absorb_budget = config_int("SUMMARY_ABSORB_BUDGET", 8_000)
-    if len(batch) == 1 and estimate_tokens(batch[0]["content"]) > absorb_budget:
-        row = batch[0]
-        new_summary = old_summary
-        for start in range(0, len(row["content"]), absorb_budget):
-            part = {**row, "content": row["content"][start:start + absorb_budget]}
-            new_summary = summarize(new_summary, [part])
-    else:
-        new_summary = summarize(old_summary, batch)
+    new_summary = summarize(old_summary, batch)
     return database.update_session_summary(session_id, cursor, new_summary, batch[-1]["id"])
