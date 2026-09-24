@@ -115,6 +115,7 @@ ReAct 强制模型每步先写出推理再行动，本项目没有这个要求�
 demo-agent/
 ├── server/                  # 后端：Agent 本体（Python / uv）
 │   ├── api.py               # FastAPI 路由、会话并发保护与 SSE 输出
+│   ├── chat_stream.py       # 聊天 SSE 编排：事件循环、done 落库与埋点落库
 │   ├── database/            # SQLite schema 与 Session/Message/File 数据访问
 │   ├── documents/           # PDF 隔离存储与文件生命周期清理
 │   ├── agent/               # 模型交互

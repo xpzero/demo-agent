@@ -7,6 +7,8 @@
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .context_budget import estimate_tokens
+
 # 截断副本上限：与 LangSmith / LangFuse 等观测平台一致的取舍，
 # 账本要的是「足以判断这次执行正常吗」，全量留在原始来源
 EXCERPT_LIMIT = 500
@@ -89,3 +91,71 @@ class TurnRecorder:
                     if isinstance(value, int):
                         totals[key] = totals.get(key, 0) + value
         return totals or None
+
+
+def export_turns(recorder: TurnRecorder) -> list[dict]:
+    """把内存账本导出为落库行（agent 层数据结构 → database 参数）。
+
+    有实测 usage 用实测；没有则按该次请求的 items 快照估算 prompt、
+    按回复文本估算 completion——同一行里估算值与实测值分列存放，
+    事后可用实测校准估算。
+    """
+    turns = []
+    for record in recorder.turns:
+        usage = record.usage or {}
+        estimated_prompt = None
+        if not usage and record.items_snapshot is not None:
+            estimated_prompt = sum(
+                estimate_tokens(message.get("content") or "")
+                for message in record.items_snapshot
+                if isinstance(message, dict)
+            )
+        estimated_completion = None
+        if not usage and record.reply_text is not None:
+            estimated_completion = estimate_tokens(record.reply_text)
+        turns.append(
+            {
+                "duration_ms": record.duration_ms,
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "completion_tokens": usage.get("completion_tokens"),
+                "estimated_prompt_tokens": (
+                    usage.get("prompt_tokens") or estimated_prompt
+                ),
+                "estimated_completion_tokens": (
+                    usage.get("completion_tokens") or estimated_completion
+                ),
+                "tools": [
+                    {
+                        "name": tool.name,
+                        "args_excerpt": tool.args_excerpt,
+                        "result_excerpt": tool.result_excerpt,
+                        "duration_ms": tool.duration_ms,
+                        "ok": tool.ok,
+                    }
+                    for tool in record.tools
+                ],
+            }
+        )
+    return turns
+
+
+def summarize_meta(recorder: TurnRecorder) -> dict:
+    """助手消息的汇总挂牌：生成该回答的成本，done 落库时顺手写入。"""
+    total = recorder.total_usage or {}
+    estimated = not bool(total)
+    estimated_prompt = 0
+    if estimated:
+        for record in recorder.turns:
+            if record.items_snapshot is not None:
+                for message in record.items_snapshot:
+                    if isinstance(message, dict):
+                        estimated_prompt += estimate_tokens(
+                            message.get("content") or ""
+                        )
+    return {
+        "turns": len(recorder.turns),
+        "prompt_tokens": total.get("prompt_tokens"),
+        "completion_tokens": total.get("completion_tokens"),
+        "estimated": estimated,
+        "estimated_prompt_tokens": total.get("prompt_tokens") or estimated_prompt,
+    }

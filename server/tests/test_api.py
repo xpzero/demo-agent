@@ -9,6 +9,7 @@ from uuid import uuid4
 os.environ.setdefault("API_KEY", "test-key")
 
 import api  # noqa: E402
+import chat_stream  # noqa: E402
 from database import Database  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -48,7 +49,7 @@ class ChatApiTests(unittest.TestCase):
         return [json.loads(frame.removeprefix("data: ")) for frame in response.text.strip().split("\n\n")]
 
     def test_first_chat_creates_session_and_persists_assistant(self):
-        with patch.object(api, "stream_events", return_value=iter([
+        with patch.object(chat_stream, "stream_events", return_value=iter([
             {"type": "text_delta", "text": "你好"},
             {"type": "done", "content": "你好"},
         ])):
@@ -101,7 +102,7 @@ class ChatApiTests(unittest.TestCase):
             seen.extend(items)
             yield {"type": "done", "content": "second answer"}
 
-        with patch.object(api, "stream_events", side_effect=stream):
+        with patch.object(chat_stream, "stream_events", side_effect=stream):
             response = self.client.post("/api/chat", json=self.payload(parent_message_id=assistant, message="second"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual([item["role"] for item in seen], ["system", "user", "assistant", "user"])
@@ -119,7 +120,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(api._running_sessions, set())
 
     def test_failed_stream_keeps_user_message_as_parent(self):
-        with patch.object(api, "stream_events", return_value=iter([
+        with patch.object(chat_stream, "stream_events", return_value=iter([
             {"type": "error", "message": "gateway failed"},
         ])):
             response = self.client.post("/api/chat", json=self.payload())
@@ -133,7 +134,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(api._running_sessions, set())
 
     def test_stream_without_terminal_event_emits_error_and_releases_session(self):
-        with patch.object(api, "stream_events", return_value=iter([
+        with patch.object(chat_stream, "stream_events", return_value=iter([
             {"type": "text_delta", "text": "partial"},
         ])):
             response = self.client.post("/api/chat", json=self.payload())
@@ -144,7 +145,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(api._running_sessions, set())
 
     def test_max_turns_ends_with_error_and_releases_session(self):
-        with patch.object(api, "stream_events", return_value=iter([
+        with patch.object(chat_stream, "stream_events", return_value=iter([
             {"type": "max_turns"},
         ])):
             response = self.client.post("/api/chat", json=self.payload())
@@ -158,7 +159,7 @@ class ChatApiTests(unittest.TestCase):
         def broken(_items, context=None, recorder=None):
             yield {"type": "text_delta", "text": "partial"}
             raise RuntimeError("stream interrupted")
-        with patch.object(api, "stream_events", side_effect=broken):
+        with patch.object(chat_stream, "stream_events", side_effect=broken):
             response = self.client.post("/api/chat", json=self.payload())
         self.assertEqual(
             [event["type"] for event in self.events(response)],
@@ -168,7 +169,7 @@ class ChatApiTests(unittest.TestCase):
 
     def test_assistant_persistence_failure_emits_error_not_done(self):
         with patch.object(Database, "add_assistant_message", side_effect=RuntimeError("write failed")):
-            with patch.object(api, "stream_events", return_value=iter([
+            with patch.object(chat_stream, "stream_events", return_value=iter([
                 {"type": "done", "content": "answer"},
             ])):
                 response = self.client.post("/api/chat", json=self.payload())
@@ -188,7 +189,7 @@ class ChatApiTests(unittest.TestCase):
         uploaded = self.client.post(
             "/api/documents", files={"file": ("report.pdf", b"%PDF-content", "application/pdf")}
         ).json()
-        with patch.object(api, "stream_events", return_value=iter([{"type": "done", "content": "ok"}])):
+        with patch.object(chat_stream, "stream_events", return_value=iter([{"type": "done", "content": "ok"}])):
             response = self.client.post("/api/chat", json=self.payload(ref_file_ids=[uploaded["file_id"]]))
         self.assertEqual(response.status_code, 200)
         messages = self.client.get(f"/api/sessions/{self.session_id}").json()["messages"]
@@ -220,7 +221,7 @@ class ChatApiTests(unittest.TestCase):
             )
             yield {"type": "done", "content": "answer"}
 
-        with patch.object(api, "stream_events", side_effect=fake_stream):
+        with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
             response = self.client.post("/api/chat", json=self.payload())
         self.assertEqual(response.status_code, 200)
 
@@ -251,7 +252,7 @@ class ChatApiTests(unittest.TestCase):
             recorder.start_turn()
             yield {"type": "error", "message": "boom"}
 
-        with patch.object(api, "stream_events", side_effect=fake_stream):
+        with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
             response = self.client.post("/api/chat", json=self.payload())
         self.assertEqual(response.status_code, 200)
         with self.database.connection() as connection:
@@ -269,7 +270,7 @@ class ChatApiTests(unittest.TestCase):
         with patch.object(
             Database, "record_agent_turns", side_effect=RuntimeError("db down")
         ):
-            with patch.object(api, "stream_events", side_effect=fake_stream):
+            with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
                 response = self.client.post("/api/chat", json=self.payload())
         events = self.events(response)
         self.assertEqual(events[-1]["type"], "done")

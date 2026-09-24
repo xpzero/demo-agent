@@ -1,4 +1,3 @@
-import json
 import logging
 from contextlib import asynccontextmanager
 from threading import Lock
@@ -9,16 +8,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from agent import SYSTEM_PROMPT, stream_events
-from agent.context_budget import build_context, estimate_tokens
-from agent.metrics import TurnRecorder, excerpt
+from agent import SYSTEM_PROMPT
+from agent.context_budget import build_context
+from chat_stream import chat_sse_stream
 from database import DATABASE_PATH as DEFAULT_DATABASE_PATH
 from database import Database, StoreError
 from documents import FILE_ROOT as DEFAULT_FILE_ROOT
 from documents import MAX_FILE_BYTES, FileUploadError, save_pdf
 from documents.cleanup import cleanup_files
 from logging_setup import setup_logging
-from tools.context import SessionContext
 
 setup_logging()
 
@@ -63,75 +61,6 @@ ATTACHED_DOCUMENT_RULE = (
     "本会话带有 PDF 附件。回答与文档内容相关的问题前，"
     "必须先调用 parse_attached_document 工具解析文档，再基于解析结果回答。"
 )
-
-
-def _sse(event: dict) -> str:
-    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-
-
-def _export_turns(recorder: TurnRecorder) -> list[dict]:
-    """把内存账本导出为落库行（agent 层数据结构 → database 参数）。"""
-    from agent.context_budget import estimate_tokens
-
-    turns = []
-    for record in recorder.turns:
-        usage = record.usage or {}
-        estimated_prompt = None
-        if not usage and record.items_snapshot is not None:
-            estimated_prompt = sum(
-                estimate_tokens(m.get("content") or "")
-                for m in record.items_snapshot
-            )
-        turns.append(
-            {
-                "duration_ms": record.duration_ms,
-                "prompt_tokens": usage.get("prompt_tokens"),
-                "completion_tokens": usage.get("completion_tokens"),
-                "estimated_prompt_tokens": (
-                    usage.get("prompt_tokens") or estimated_prompt
-                ),
-                "estimated_completion_tokens": (
-                    usage.get("completion_tokens")
-                    if usage
-                    else (
-                        estimate_tokens(record.reply_text)
-                        if record.reply_text is not None
-                        else None
-                    )
-                ),
-                "tools": [
-                    {
-                        "name": tool.name,
-                        "args_excerpt": tool.args_excerpt,
-                        "result_excerpt": tool.result_excerpt,
-                        "duration_ms": tool.duration_ms,
-                        "ok": tool.ok,
-                    }
-                    for tool in record.tools
-                ],
-            }
-        )
-    return turns
-
-
-def _summarize_meta(recorder: TurnRecorder) -> dict:
-    """助手消息的汇总挂牌：生成该回答的成本，done 落库时顺手写入。"""
-    total = recorder.total_usage or {}
-    estimated = not bool(total)
-    estimated_prompt = 0
-    if estimated:
-        for record in recorder.turns:
-            if record.items_snapshot is not None:
-                for message in record.items_snapshot:
-                    content = message.get("content") if isinstance(message, dict) else None
-                    estimated_prompt += estimate_tokens(content or "")
-    return {
-        "turns": len(recorder.turns),
-        "prompt_tokens": total.get("prompt_tokens"),
-        "completion_tokens": total.get("completion_tokens"),
-        "estimated": estimated,
-        "estimated_prompt_tokens": total.get("prompt_tokens") or estimated_prompt,
-    }
 
 
 def _http_error(error: StoreError | FileUploadError) -> HTTPException:
@@ -215,69 +144,17 @@ def chat(body: ChatRequest):
         with _lock:
             _running_sessions.discard(session_id)
 
-    def sse():
-        recorder = TurnRecorder()
-        context = SessionContext(
-            session_id=session_id, database=database, file_root=FILE_ROOT
-        )
-        try:
-            yield _sse({"type": "user_message", "message_id": user_message_id})
-            terminated = False
-            assistant_message_id = None
-            for event in stream_events(
-                items, context=context, recorder=recorder
-            ):
-                if event["type"] == "done":
-                    content = event["content"]
-                    message_id = user_message_id
-                    if content:
-                        try:
-                            message_id = database.add_assistant_message(
-                                session_id=session_id,
-                                parent_message_id=user_message_id,
-                                content=content,
-                            )
-                        except Exception as error:
-                            yield _sse(
-                                {
-                                    "type": "error",
-                                    "message": (
-                                        "保存助手消息失败："
-                                        f"{type(error).__name__}: {error}"
-                                    ),
-                                }
-                            )
-                            return
-                    assistant_message_id = message_id if content else None
-                    event = {**event, "message_id": message_id}
-                yield _sse(event)
-                if event["type"] in ("done", "error"):
-                    terminated = True
-                    break
-            if not terminated:
-                yield _sse({"type": "error", "message": "本轮回复未完成，请重试"})
-        except Exception as error:
-            yield _sse({"type": "error", "message": f"回复中断：{type(error).__name__}: {error}"})
-        finally:
-            # P0-2 埋点落库：账本锚定本轮用户消息（轮开始前已存在），
-            # 汇总挂牌挂助手消息；失败只记日志，不影响回复
-            try:
-                database.record_agent_turns(
-                    message_id=user_message_id, turns=_export_turns(recorder)
-                )
-                if assistant_message_id is not None:
-                    database.set_message_meta(
-                        assistant_message_id,
-                        _summarize_meta(recorder),
-                    )
-            except Exception as error:
-                logging.getLogger(__name__).warning(
-                    "埋点落库失败：%s: %s", type(error).__name__, error
-                )
-            release_session()
-
+    # 编排细节（事件循环、done 落库、埋点落库）在 chat_stream；
+    # 这里只负责请求校验、会话锁与 StreamingResponse 组装
     return StreamingResponse(
-        sse(),
+        chat_sse_stream(
+            database=database,
+            session_id=session_id,
+            user_message_id=user_message_id,
+            items=items,
+            file_root=FILE_ROOT,
+            release_session=release_session,
+        ),
         media_type="text/event-stream",
         background=BackgroundTask(release_session),
     )

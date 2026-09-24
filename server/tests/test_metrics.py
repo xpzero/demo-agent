@@ -89,5 +89,55 @@ class AgentTurnModelTests(unittest.TestCase):
         self.assertTrue(record.ok)  # 请求本身没抛异常即视为成功
 
 
+class ExportAndSummarizeTests(unittest.TestCase):
+    def make_recorder(self):
+        from agent.metrics import TurnRecorder
+        from agent.metrics import TurnRecord
+
+        recorder = TurnRecorder()
+        with_usage = TurnRecord(
+            usage={"prompt_tokens": 100, "completion_tokens": 20},
+            reply_text="实测轮",
+        )
+        without_usage = TurnRecord(
+            items_snapshot=[
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "问十个字的问题"},
+            ],
+            reply_text="估",
+        )
+        recorder.turns = [with_usage, without_usage]
+        return recorder
+
+    def test_export_uses_measured_when_available(self):
+        from agent.metrics import export_turns
+
+        turns = export_turns(self.make_recorder())
+        self.assertEqual(turns[0]["prompt_tokens"], 100)
+        # 有实测时估算列同填实测值（每行两口径同落，便于校准）
+        self.assertEqual(turns[0]["estimated_prompt_tokens"], 100)
+        self.assertEqual(turns[0]["estimated_completion_tokens"], 20)
+
+    def test_export_estimates_from_snapshot_without_usage(self):
+        from agent.metrics import export_turns
+
+        turns = export_turns(self.make_recorder())
+        second = turns[1]
+        # 快照内容长度 = len("sys") + len("问十个字的问题") = 3 + 7 = 10
+        self.assertEqual(second["estimated_prompt_tokens"], 10)
+        self.assertEqual(second["estimated_completion_tokens"], 1)
+
+    def test_summarize_meta_marks_estimated_only_without_usage(self):
+        from agent.metrics import summarize_meta
+
+        meta = summarize_meta(self.make_recorder())
+        self.assertEqual(meta["turns"], 2)
+        # 只要有一轮带实测 usage，meta 用实测合计、不标估
+        self.assertFalse(meta["estimated"])
+        self.assertEqual(meta["prompt_tokens"], 100)
+        self.assertEqual(meta["completion_tokens"], 20)
+        self.assertEqual(meta["estimated_prompt_tokens"], 100)
+
+
 if __name__ == "__main__":
     unittest.main()
