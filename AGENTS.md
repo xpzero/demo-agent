@@ -82,7 +82,7 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 - `user_message`：`message_id`（API 持久化用户消息后追加）
 - `text_delta`：`text`
 - `tool_call`：`id`、`name`、`args`
-- `tool_result`：`id`、`content`
+- `tool_result`：`id`、`content`、`elapsed`（工具执行耗时毫秒，P0-2 前端工具卡片用）
 - `done`：`content`、`message_id`（API 持久化助手消息后追加）
 - `max_turns`
 - `error`：`message`

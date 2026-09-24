@@ -138,13 +138,14 @@ def _run_tool_calls(
         tool_started = time.monotonic()
         tool_output, tool_ok = execute_tool(tool_call["name"], args, context)
         _check_deadline(deadline)
+        tool_elapsed_ms = (time.monotonic() - tool_started) * 1000
         if current_turn is not None:
             current_turn.tools.append(
                 ToolRecord(
                     name=tool_call["name"],
                     args_excerpt=excerpt(args),
                     result_excerpt=excerpt(tool_output),
-                    duration_ms=(time.monotonic() - tool_started) * 1000,
+                    duration_ms=tool_elapsed_ms,
                     ok=tool_ok,
                 )
             )
@@ -159,6 +160,7 @@ def _run_tool_calls(
             "type": "tool_result",
             "id": tool_call["id"],
             "content": tool_output,
+            "elapsed": tool_elapsed_ms,
         }
 
 

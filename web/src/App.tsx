@@ -1,6 +1,7 @@
 import UserInput from "@/components/ui/user-input";
 import ChatMessages from "@/components/ui/chat-messages";
 import AppSidebar from "@/components/ui/app-sidebar";
+import SessionStatsBadge from "@/components/ui/session-stats-badge";
 import { Button } from "@/components/shadcn/button";
 import {
   SidebarInset,
@@ -12,14 +13,19 @@ import { useUserInputStore } from "@/stores";
 import { useSessionStore } from "@/stores/session";
 import { useChat } from "@/hooks/useChat";
 import { useSessions } from "@/hooks/useSessions";
+import { useSessionStats } from "@/hooks/useSessionStats";
 
 export default function App() {
   const clear = useUserInputStore((state) => state.clear);
   const sessionGeneration = useSessionStore((state) => state.sessionGeneration);
   const { sessions, loading, error: sessionsError, refresh } = useSessions();
+  const { stats, refreshStats } = useSessionStats();
   const {
     running, error, messages, send, historyReady, loadingHistory, historyError, retryHistory,
-  } = useChat(() => { void refresh(); });
+  } = useChat(() => {
+    void refresh();
+    refreshStats();
+  });
   const busy = running || loadingHistory;
 
   const selectSession = (id: string) => {
@@ -54,6 +60,7 @@ export default function App() {
           <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
             <SidebarTrigger />
             <h1 className="text-sm font-semibold">Agent Demo</h1>
+            <SessionStatsBadge stats={stats} />
           </header>
 
           <main className="flex min-h-0 flex-1 flex-col items-center gap-4 overflow-hidden py-8">
