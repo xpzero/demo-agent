@@ -119,6 +119,7 @@ demo-agent/
 │   ├── documents/           # PDF 隔离存储与文件生命周期清理
 │   ├── agent/               # 模型交互
 │   │   ├── client.py        # 智谱（OpenAI 兼容）客户端、MODEL、SYSTEM_PROMPT
+│   │   ├── context_budget.py # 上下文预算：截断策略，构造 items 时的长度控制
 │   │   └── loop.py          # Chat Completions 流式 agent loop，产出项目内事件
 │   ├── tools/               # 工具集合，一个工具一个文件，按领域分子包
 │   │   ├── calculate.py
@@ -188,7 +189,7 @@ demo-agent/
 - `tools/calculate.py` 用 `eval()` 执行模型给的表达式，等于任意代码执行；权限与审批机制移除后模型无需确认即可触发，仅适用于本地学习，不能上线
 - **prompt injection 未真正防住**：`web_search` / `fetch_url` 引入的外部内容可能夹带指令，且现在没有任何写入前确认，模型可能被诱导改写文件
 - `write_file` 无确认直接覆盖文件，没有备份或事务，也还没有“读取外部内容后禁止写入”等隔离
-- 没有上下文长度控制，多轮对话久了会超出 token 上限
+- 上下文长度控制目前只有纯截断（`agent/context_budget.py`，`len(text)` 一字一 token 保守估算、预算 24K、system 永在、至少保留最新一条）；被截掉的早期历史对模型不可见，滚动摘要尚未实现
 - 没有应用层重试策略；模型请求或流处理异常会转成 `error` 事件，但中断的任务不会自动续跑
 - 300 秒整轮时限只在模型 chunk 边界与工具执行前后检查；已进入阻塞的工具调用无法被强行抢占，超时要等调用返回后才生效
 - HTTP 聊天用进程内标志与锁阻止并发运行；多 worker 或多进程部署不受支持
@@ -197,7 +198,7 @@ demo-agent/
 
 ### 1. 上下文控制
 
-当前每轮都会重放所选父消息链的用户/助手最终文本。后续需要在接近模型上下文上限前做截断、摘要或 compaction；工具调用和工具结果是否作为 Fragment 持久化仍待设计。
+截断已上线（`agent/context_budget.py`：预算 24K、system 永在、至少保留最新一条）。后续待做：滚动摘要（`chat_sessions` 加 summary 两列、轮尾旁路压缩）、stats 接口，见 `docs/ROADMAP.md`；工具调用和工具结果是否作为 Fragment 持久化仍待设计。
 
 ### 2. 并发与会话存储
 
