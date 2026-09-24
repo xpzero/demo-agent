@@ -15,15 +15,15 @@ test("历史消息按顺序恢复用户和助手文本", () => {
   ]);
 });
 
-test("历史回复正文后附上该轮工具存档短文本", () => {
+test("历史回复正文前展示该轮工具存档短文本", () => {
   const [assistant] = historyToMessages([
     { id: 9, role: "assistant", content: "今天晴", created_at: 1700000005,
       tool_runs: [{ id: 12, name: "get_weather", args_excerpt: "{'city': '北京'}", result_excerpt: "晴", duration_ms: 98 }] },
   ]);
   assert.deepEqual(assistant.events, [
-    { type: "text_delta", text: "今天晴" },
     { type: "tool_call", id: "12", name: "get_weather", args: "{'city': '北京'}", excerpt: true },
     { type: "tool_result", id: "12", content: "晴", elapsed: 98 },
+    { type: "text_delta", text: "今天晴" },
   ]);
 });
 

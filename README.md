@@ -141,7 +141,7 @@ demo-agent/
         └── stores/          # 页内输入状态与当前 Session 指针
 ```
 
-文件工具的根目录限定在 `server/` 内——Agent 读写不到 `web/` 与仓库根，`.env`、`.git` 与 `.sessions` 也禁止访问。会话、最终用户/助手消息、上传文件信息和消息—文件关系存于 `server/.data/demo-agent.sqlite3`；每轮 Chat 根据 `session_id` 与 `parent_message_id` 从 SQLite 还原当前消息链，再临时投影成 Chat Completions `items`。历史接口按本轮用户消息关联 `agent_turns` 与 `tool_runs`，在对应助手回复下展示工具名称、耗时及参数/结果短文本（最多约 500 字）；实时事件仍有完整结果。历史账本不记录工具与正文的交错位置，故历史界面在正文后展示工具卡片；模型上下文仍只使用最终用户/助手文本。
+文件工具的根目录限定在 `server/` 内——Agent 读写不到 `web/` 与仓库根，`.env`、`.git` 与 `.sessions` 也禁止访问。会话、最终用户/助手消息、上传文件信息和消息—文件关系存于 `server/.data/demo-agent.sqlite3`；每轮 Chat 根据 `session_id` 与 `parent_message_id` 从 SQLite 还原当前消息链，再临时投影成 Chat Completions `items`。历史接口按本轮用户消息关联 `agent_turns` 与 `tool_runs`，在对应助手回复下展示工具名称、耗时及参数/结果短文本（最多约 500 字）；实时事件仍有完整结果。历史账本不记录工具与正文的交错位置，故历史界面在正文前展示工具卡片；模型上下文仍只使用最终用户/助手文本。
 
 现有工具：
 

@@ -1,11 +1,11 @@
 import type { AgentEvent } from "@/adapter";
 import { Marker, MarkerContent, MarkerIcon } from "@/components/shadcn/marker";
 import { Spinner } from "@/components/shadcn/spinner";
-import { deriveSegments } from "../../utils/segments";
+import { deriveSegments, isAwaitingReply } from "../../utils/segments";
 import ToolCallCard from "../tool-call-card";
 
-/** 从助手事件流派生正文分段；没有可见分段时显示「思考中」。 */
-export default function AssistantMessageBody({ events }: { events: AgentEvent[] }) {
+/** 从助手事件流派生正文分段及工具执行后的等待状态。 */
+export default function AssistantMessageBody({ events, completed }: { events: AgentEvent[]; completed: boolean }) {
   const segments = deriveSegments(events);
   return (
     <>
@@ -28,7 +28,7 @@ export default function AssistantMessageBody({ events }: { events: AgentEvent[] 
           return <ToolCallCard key={index} segment={segment} />;
         }
       })}
-      {segments.length === 0 && (
+      {isAwaitingReply(events, completed) && (
         <Marker>
           <MarkerIcon><Spinner /></MarkerIcon>
           <MarkerContent>思考中…</MarkerContent>

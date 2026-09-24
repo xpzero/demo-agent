@@ -11,11 +11,11 @@ export function historyToMessages(messages: SessionMessage[]): ChatMessage[] {
           createdAt: message.created_at,
           messageId: message.id,
           events: [
-            ...(message.content ? [{ type: "text_delta" as const, text: message.content }] : []),
             ...(message.tool_runs ?? []).flatMap((run) => [
               { type: "tool_call" as const, id: String(run.id), name: run.name, args: run.args_excerpt, excerpt: true },
               { type: "tool_result" as const, id: String(run.id), content: run.result_excerpt, elapsed: run.duration_ms ?? undefined },
             ]),
+            ...(message.content ? [{ type: "text_delta" as const, text: message.content }] : []),
             ...(!message.content && !message.tool_runs?.length
               ? [{ type: "done" as const, content: "", message_id: message.id }] : []),
           ],

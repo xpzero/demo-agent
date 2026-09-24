@@ -16,6 +16,11 @@ export type Segment =
   | ToolSegment
   | { kind: "note"; text: string };
 
+/** 工具返回后模型还需再次请求；只有未完成的实时消息才显示等待提示。 */
+export function isAwaitingReply(events: AgentEvent[], completed: boolean): boolean {
+  return !completed && (events.length === 0 || events.at(-1)?.type === "tool_result");
+}
+
 /** 按事件到达序派生展示分段：文本增量累加，工具调用截断文本段，结果按 tool_call_id 回填。 */
 export function deriveSegments(events: AgentEvent[]): Segment[] {
   const segments: Segment[] = [];

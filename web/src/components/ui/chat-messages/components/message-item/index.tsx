@@ -5,10 +5,10 @@ import { MessageScrollerItem } from "@/components/shadcn/message-scroller";
 import AssistantMessageBody from "../assistant-message-body";
 import MessageMeta from "../message-meta";
 
-/** 单条消息的滚动锚点、对齐方式及正文和操作。 */
+/** 单条消息的对齐方式、正文和操作。 */
 export default function MessageItem({ message }: { message: ChatMessage }) {
   return (
-    <MessageScrollerItem className="group/message" messageId={message.id} scrollAnchor={message.kind === "user"}>
+    <MessageScrollerItem className="group/message" messageId={message.id}>
       <Message align={message.kind === "user" ? "end" : "start"}>
         <MessageContent>
           {message.kind === "user" ? (
@@ -18,7 +18,7 @@ export default function MessageItem({ message }: { message: ChatMessage }) {
               </BubbleContent>
             </Bubble>
           ) : (
-            <AssistantMessageBody events={message.events} />
+            <AssistantMessageBody events={message.events} completed={message.messageId !== undefined} />
           )}
           <MessageMeta message={message} />
         </MessageContent>
