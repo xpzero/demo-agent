@@ -9,7 +9,7 @@ from uuid import uuid4
 os.environ.setdefault("API_KEY", "test-key")
 
 import api  # noqa: E402
-import chat_stream  # noqa: E402
+from api import chat_stream  # noqa: E402
 from database import Database  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -20,8 +20,8 @@ class ChatApiTests(unittest.TestCase):
         self.database_path = Path(self.directory.name) / "test.sqlite3"
         self.root = Path(self.directory.name) / "files"
         self.patches = [
-            patch.object(api, "DATABASE_PATH", self.database_path),
-            patch.object(api, "FILE_ROOT", self.root),
+            patch.object(api.deps, "DATABASE_PATH", self.database_path),
+            patch.object(api.deps, "FILE_ROOT", self.root),
         ]
         for item in self.patches:
             item.start()

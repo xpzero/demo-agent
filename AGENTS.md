@@ -4,10 +4,10 @@
 
 ## 项目定位与事实来源
 
-- 这是一个教学型 Agent 项目：不依赖 Agent 框架，直接使用 OpenAI Python SDK 调用智谱的 OpenAI 兼容接口（Chat Completions）。
+- 本项目是一个教学型 Agent 项目：不依赖 Agent 框架，直接使用 OpenAI Python SDK 调用智谱的 OpenAI 兼容接口（Chat Completions）。
 - 后端位于 `server/`，使用 Python 3.12、FastAPI、OpenAI SDK、Tavily 和 uv。
 - 前端位于 `web/`，使用 React、TypeScript、Vite 和 Tailwind CSS；assistant-ui 已移除，界面由使用者自行重写。
-- 实际后端入口是 `server/api.py`（HTTP/SSE）；实际依赖清单是 `server/pyproject.toml` 与 `server/uv.lock`。
+- 实际后端入口是 `server/api/` 包（`__init__.py` 组装并导出 `app`，`uvicorn api:app` 不变）；实际依赖清单是 `server/pyproject.toml` 与 `server/uv.lock`。
 - 根目录的 `main.py`、`pyproject.toml` 和 `.python-version` 是早期空脚手架，不是后端运行环境。
 - 当前代码与依赖清单是实现事实来源。架构、命令、事件协议或已知限制改变时，同步更新相关 README。
 
@@ -56,7 +56,7 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 
 - `server/agent/`：智谱（OpenAI 兼容）客户端配置与唯一 Agent 内核。
 - `server/tools/`：工具 schema、实现、注册和执行分发。
-- `server/api.py`：FastAPI 路由、进程内会话运行保护、CORS 和项目事件到 SSE 的传输映射；`server/chat_stream.py` 承担一轮 Chat 的流式编排（事件循环、done 落库、埋点落库）；`server/database/` 持久化 Session/Message/File。
+- `server/api/`：FastAPI 应用包。`__init__.py` 组装导出 `app`；`routes.py` 承担路由、进程内会话运行保护与 SSE 传输映射；`chat_stream.py` 承担一轮 Chat 的流式编排（事件循环、done 落库、埋点落库）；`deps.py` 提供数据库入口与共享常量；`server/database/` 持久化 Session/Message/File。
 - `web/src/adapter/`：HTTP 请求、SSE 分帧与项目事件类型定义，不依赖任何 UI 框架。`types.ts` 是事件类型，`transport.ts` 是 API 地址、请求错误与 SSE 分帧，`index.ts` 是聊天请求与公共导出。
 - `web/src/App.tsx`：界面组合层；`web/src/chat/` 管理前端消息模型与纯函数，`web/src/hooks/` 管理请求与状态，展示逻辑与 `adapter/` 保持分离。
 
