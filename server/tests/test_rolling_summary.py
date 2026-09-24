@@ -9,7 +9,7 @@ from uuid import uuid4
 os.environ.setdefault("API_KEY", "test-key")
 
 from agent.context_budget import (
-    SUMMARY_PREFIX, build_context, choose_to_absorb, maybe_roll,
+    SUMMARY_PREFIX, build_context, choose_to_absorb, maybe_roll, needs_roll,
 )
 from database import Database
 from database.connection import SCHEMA
@@ -32,6 +32,19 @@ class RollingContextTests(unittest.TestCase):
         self.assertEqual([item["content"] for item in items[2:]], ["b" * 80, "现在的问题"])
         self.assertEqual(build_context("sys", [row(5, "user", "x" * 200)], budget=50,
                                        summary="旧摘要", summary_upto_message_id=2)[-1]["content"], "x" * 200)
+
+    def test_configured_trigger_and_invalid_values(self):
+        living = [row(i, "user", "x" * 1000) for i in range(16)]
+        with patch.dict(os.environ, {"SUMMARY_ROLL_TRIGGER": "20000"}):
+            self.assertEqual(choose_to_absorb(living), [])
+        with patch.dict(os.environ, {"SUMMARY_ROLL_TRIGGER": "12000"}):
+            self.assertEqual([item["id"] for item in choose_to_absorb(living)], list(range(8)))
+        with patch.dict(os.environ, {"SUMMARY_ROLL_TRIGGER": "invalid"}):
+            with self.assertRaisesRegex(ValueError, "SUMMARY_ROLL_TRIGGER"):
+                choose_to_absorb(living)
+        with patch.dict(os.environ, {"SUMMARY_ROLL_TRIGGER": "0"}):
+            with self.assertRaisesRegex(ValueError, "SUMMARY_ROLL_TRIGGER"):
+                choose_to_absorb(living)
 
     def test_roll_threshold_cap_and_backlog(self):
         living = [row(i, "user", str(i) * 1000) for i in range(1, 18)]
@@ -61,6 +74,18 @@ class RollingStoreTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_configured_trigger_controls_session_roll(self):
+        assert self.parent is not None
+        with patch.dict(os.environ, {"SUMMARY_ROLL_TRIGGER": "20000"}):
+            self.assertFalse(needs_roll(self.db, self.sid, self.parent))
+            with patch("agent.context_budget.summarize") as summarize:
+                self.assertFalse(maybe_roll(self.db, self.sid, self.parent))
+                summarize.assert_not_called()
+        with patch.dict(os.environ, {"SUMMARY_ROLL_TRIGGER": "12000"}):
+            self.assertTrue(needs_roll(self.db, self.sid, self.parent))
+            with patch("agent.context_budget.summarize", return_value="摘要"):
+                self.assertTrue(maybe_roll(self.db, self.sid, self.parent))
 
     def test_roll_updates_cursor_atomically_and_keeps_original_messages(self):
         with patch("agent.context_budget.summarize", return_value="新摘要") as summarize:

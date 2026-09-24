@@ -1,9 +1,11 @@
 """会话上下文：保留原始消息链，用滚动摘要代表较早的消息。"""
 
+import os
+
 from .client import MODEL, client
 
 CONTEXT_BUDGET = 24_000
-ROLL_TRIGGER = 12_000
+DEFAULT_ROLL_TRIGGER = 12_000
 RECENT_BUDGET = 8_000
 ABSORB_BUDGET = 8_000
 SUMMARY_MAX_TOKENS = 2_000
@@ -52,11 +54,25 @@ def build_context(
     return [system, *([summary_message] if summary_message else []), *kept]
 
 
+def roll_trigger() -> int:
+    """从环境变量读取摘要触发字符数，空值使用默认值。"""
+    value = os.getenv("SUMMARY_ROLL_TRIGGER") or str(DEFAULT_ROLL_TRIGGER)
+    try:
+        trigger = int(value)
+    except ValueError as error:
+        raise ValueError("SUMMARY_ROLL_TRIGGER 必须是正整数") from error
+    if trigger <= 0:
+        raise ValueError("SUMMARY_ROLL_TRIGGER 必须是正整数")
+    return trigger
+
+
 def choose_to_absorb(
-    living: list[dict], trigger: int = ROLL_TRIGGER,
+    living: list[dict], trigger: int | None = None,
     recent_budget: int = RECENT_BUDGET, absorb_budget: int = ABSORB_BUDGET,
 ) -> list[dict]:
     """每次最多收编约 8K；积压时从游标之后最旧的部分逐次补吃。"""
+    if trigger is None:
+        trigger = roll_trigger()
     if sum(estimate_tokens(row["content"]) for row in living) <= trigger:
         return []
     recent = pick_recent_within(living, recent_budget)
