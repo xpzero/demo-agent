@@ -1,7 +1,8 @@
+import os
 import unittest
+from unittest.mock import patch
 
 from agent.context_budget import (
-    CONTEXT_BUDGET,
     build_context,
     estimate_tokens,
     pick_recent_within,
@@ -105,9 +106,13 @@ class BuildContextTests(unittest.TestCase):
             ["system", "assistant"],
         )
 
-    def test_budget_constant_is_24k(self):
-        # 24K 起步，glm-4.6 窗口 128K，留 5 倍余量（2026-09-23 定案）
-        self.assertEqual(CONTEXT_BUDGET, 24_000)
+    def test_configured_context_budget(self):
+        chain = [row(1, "user", "a" * 100), row(2, "assistant", "b" * 100)]
+        with patch.dict(os.environ, {"CONTEXT_BUDGET": "150"}):
+            self.assertEqual([item["content"] for item in build_context("SYSTEM", chain)],
+                             ["SYSTEM", "b" * 100])
+        with patch.dict(os.environ, {"CONTEXT_BUDGET": "500"}):
+            self.assertEqual(len(build_context("SYSTEM", chain)), 3)
 
 
 if __name__ == "__main__":

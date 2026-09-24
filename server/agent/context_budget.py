@@ -4,12 +4,19 @@ import os
 
 from .client import MODEL, client
 
-CONTEXT_BUDGET = 24_000
-DEFAULT_ROLL_TRIGGER = 12_000
-RECENT_BUDGET = 8_000
-ABSORB_BUDGET = 8_000
-SUMMARY_MAX_TOKENS = 2_000
 SUMMARY_PREFIX = "以下是早期对话摘要：\n"
+
+
+def config_int(name: str, default: int) -> int:
+    """读取正整数预算；留空使用默认值。"""
+    value = os.getenv(name) or str(default)
+    try:
+        number = int(value)
+    except ValueError as error:
+        raise ValueError(f"{name} 必须是正整数") from error
+    if number <= 0:
+        raise ValueError(f"{name} 必须是正整数")
+    return number
 
 
 def estimate_tokens(text: str) -> int:
@@ -36,10 +43,12 @@ def pick_recent_within(messages: list[dict], budget: int) -> list[dict]:
 
 
 def build_context(
-    system_prompt: str, chain_rows: list[dict], budget: int = CONTEXT_BUDGET,
+    system_prompt: str, chain_rows: list[dict], budget: int | None = None,
     *, summary: str | None = None, summary_upto_message_id: int | None = None,
 ) -> list[dict]:
     """游标前由摘要代言，游标后按预算保留近期原话。"""
+    if budget is None:
+        budget = config_int("CONTEXT_BUDGET", 24_000)
     system = {"role": "system", "content": system_prompt}
     summary_message = (
         {"role": "user", "content": SUMMARY_PREFIX + summary}
@@ -54,25 +63,17 @@ def build_context(
     return [system, *([summary_message] if summary_message else []), *kept]
 
 
-def roll_trigger() -> int:
-    """从环境变量读取摘要触发字符数，空值使用默认值。"""
-    value = os.getenv("SUMMARY_ROLL_TRIGGER") or str(DEFAULT_ROLL_TRIGGER)
-    try:
-        trigger = int(value)
-    except ValueError as error:
-        raise ValueError("SUMMARY_ROLL_TRIGGER 必须是正整数") from error
-    if trigger <= 0:
-        raise ValueError("SUMMARY_ROLL_TRIGGER 必须是正整数")
-    return trigger
-
-
 def choose_to_absorb(
     living: list[dict], trigger: int | None = None,
-    recent_budget: int = RECENT_BUDGET, absorb_budget: int = ABSORB_BUDGET,
+    recent_budget: int | None = None, absorb_budget: int | None = None,
 ) -> list[dict]:
-    """每次最多收编约 8K；积压时从游标之后最旧的部分逐次补吃。"""
+    """优先收编较早消息；长消息单独成批，待分段摘要后才推进游标。"""
     if trigger is None:
-        trigger = roll_trigger()
+        trigger = config_int("SUMMARY_ROLL_TRIGGER", 12_000)
+    if recent_budget is None:
+        recent_budget = config_int("SUMMARY_RECENT_BUDGET", 8_000)
+    if absorb_budget is None:
+        absorb_budget = config_int("SUMMARY_ABSORB_BUDGET", 8_000)
     if sum(estimate_tokens(row["content"]) for row in living) <= trigger:
         return []
     recent = pick_recent_within(living, recent_budget)
@@ -84,8 +85,8 @@ def choose_to_absorb(
         if used + cost > absorb_budget:
             if chosen:
                 break
-            # 单条原文超过上限时只向摘要模型提供前 8K，避免无限重试。
-            chosen.append({**row, "content": row["content"][:absorb_budget]})
+            # 长消息单独处理，分段摘要成功后才推进整条消息的游标。
+            chosen.append(row)
             break
         chosen.append(row)
         used += cost
@@ -105,7 +106,7 @@ def summarize(old_summary: str | None, rows: list[dict]) -> str:
             )},
             {"role": "user", "content": f"旧摘要：\n{previous}\n\n新收编的对话：\n{transcript}"},
         ],
-        max_tokens=SUMMARY_MAX_TOKENS,
+        max_tokens=config_int("SUMMARY_MAX_TOKENS", 2_000),
     )
     text = response.choices[0].message.content
     if not text or not text.strip():
@@ -135,5 +136,13 @@ def maybe_roll(database, session_id: str, upto_message_id: int) -> bool:
     batch = choose_to_absorb(living)
     if not batch:
         return False
-    new_summary = summarize(old_summary, batch)
+    absorb_budget = config_int("SUMMARY_ABSORB_BUDGET", 8_000)
+    if len(batch) == 1 and estimate_tokens(batch[0]["content"]) > absorb_budget:
+        row = batch[0]
+        new_summary = old_summary
+        for start in range(0, len(row["content"]), absorb_budget):
+            part = {**row, "content": row["content"][start:start + absorb_budget]}
+            new_summary = summarize(new_summary, [part])
+    else:
+        new_summary = summarize(old_summary, batch)
     return database.update_session_summary(session_id, cursor, new_summary, batch[-1]["id"])

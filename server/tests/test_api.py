@@ -117,6 +117,12 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(history["messages"][1]["tool_runs"][0]["name"], "get_weather")
         self.assertEqual(history["messages"][1]["content"], "")
 
+    def test_invalid_context_budget_releases_session(self):
+        with patch.dict(os.environ, {"CONTEXT_BUDGET": "invalid"}):
+            with self.assertRaisesRegex(ValueError, "CONTEXT_BUDGET"):
+                self.client.post("/api/chat", json=self.payload())
+        self.assertNotIn(self.session_id, api._running_sessions)
+
     def test_stale_parent_is_rejected(self):
         first = self.database.create_user_turn(
             session_id=self.session_id,

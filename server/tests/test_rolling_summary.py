@@ -3,13 +3,14 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
 os.environ.setdefault("API_KEY", "test-key")
 
 from agent.context_budget import (
-    SUMMARY_PREFIX, build_context, choose_to_absorb, maybe_roll, needs_roll,
+    SUMMARY_PREFIX, build_context, choose_to_absorb, maybe_roll, needs_roll, summarize,
 )
 from database import Database
 from database.connection import SCHEMA
@@ -53,7 +54,19 @@ class RollingContextTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in choose_to_absorb(living[8:])], [9, 10, 11, 12])
         self.assertEqual(choose_to_absorb([row(1, "user", "x" * 12_000)]), [])
         oversized = choose_to_absorb([row(1, "user", "x" * 10_000), row(2, "user", "y" * 8_000)])
-        self.assertEqual(len(oversized[0]["content"]), 8_000)
+        self.assertEqual(len(oversized[0]["content"]), 10_000)
+
+    def test_configured_recent_absorb_and_output_budgets(self):
+        living = [row(i, "user", "x" * 1000) for i in range(16)]
+        with patch.dict(os.environ, {"SUMMARY_RECENT_BUDGET": "2000",
+                                          "SUMMARY_ABSORB_BUDGET": "3000"}):
+            self.assertEqual(len(choose_to_absorb(living)), 3)
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="摘要"))])
+        with patch.dict(os.environ, {"SUMMARY_MAX_TOKENS": "700"}), patch(
+            "agent.context_budget.client.chat.completions.create", return_value=response,
+        ) as create:
+            self.assertEqual(summarize(None, [row(1, "user", "问")]), "摘要")
+            self.assertEqual(create.call_args.kwargs["max_tokens"], 700)
 
 
 class RollingStoreTests(unittest.TestCase):
@@ -105,6 +118,24 @@ class RollingStoreTests(unittest.TestCase):
             self.assertTrue(maybe_roll(self.db, self.sid, aid))
         self.assertEqual(summarize.call_args.args[0], "新摘要")
         self.assertEqual(self.db.get_session_summary(self.sid), ("合并摘要", 13))
+
+    def test_long_message_is_fully_summarized_before_cursor_moves(self):
+        sid = str(uuid4())
+        uid = self.db.create_user_turn(session_id=sid, parent_message_id=None,
+                                       content="a" * 10_000, file_ids=[])
+        aid = self.db.add_assistant_message(session_id=sid, parent_message_id=uid,
+                                            content="b" * 8_000)
+        with patch("agent.context_budget.summarize", side_effect=["前段", RuntimeError("offline")]) as call:
+            with self.assertRaises(RuntimeError):
+                maybe_roll(self.db, sid, aid)
+            self.assertEqual([len(args.args[1][0]["content"]) for args in call.call_args_list],
+                             [8_000, 2_000])
+            self.assertEqual(call.call_args_list[1].args[0], "前段")
+        self.assertEqual(self.db.get_session_summary(sid), (None, None))
+        with patch("agent.context_budget.summarize", side_effect=["前段", "完整"]) as call:
+            self.assertTrue(maybe_roll(self.db, sid, aid))
+            self.assertEqual(call.call_count, 2)
+        self.assertEqual(self.db.get_session_summary(sid), ("完整", uid))
 
     def test_failed_roll_does_not_advance_cursor_and_can_retry(self):
         with patch("agent.context_budget.summarize", side_effect=RuntimeError("offline")):
