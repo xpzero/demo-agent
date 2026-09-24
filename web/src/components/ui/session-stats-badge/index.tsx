@@ -9,7 +9,7 @@ export default function SessionStatsBadge({ stats }: { stats: SessionStats | nul
     return null;
   }
   const tokens = stats.estimated
-    ? stats.estimated_prompt_tokens
+    ? stats.estimated_prompt_tokens + stats.estimated_completion_tokens
     : stats.total_prompt_tokens + stats.total_completion_tokens;
   const suffix = stats.estimated ? "（估）" : "";
   return (

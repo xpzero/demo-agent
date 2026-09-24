@@ -48,7 +48,7 @@ def chat_sse_stream(
             if event["type"] == "done":
                 content = event["content"]
                 message_id = user_message_id
-                if content:
+                if content or any(turn.tools for turn in recorder.turns):
                     try:
                         message_id = database.add_assistant_message(
                             session_id=session_id,
@@ -66,7 +66,7 @@ def chat_sse_stream(
                             }
                         )
                         return
-                assistant_message_id = message_id if content else None
+                assistant_message_id = message_id if message_id != user_message_id else None
                 event = {**event, "message_id": message_id}
             yield _sse(event)
             if event["type"] in ("done", "error"):

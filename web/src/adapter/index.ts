@@ -17,6 +17,8 @@ export type SessionMessage = {
   role: "user" | "assistant";
   status: string;
   content: string;
+  /** 按本轮用户消息关联的工具账本（仅含存档短文本）。 */
+  tool_runs?: { id: number; name: string; args_excerpt: string; result_excerpt: string; duration_ms: number | null }[];
   created_at: number;
   files: { id: string; filename: string }[];
 };
@@ -32,6 +34,7 @@ export type SessionStats = {
   total_prompt_tokens: number;
   total_completion_tokens: number;
   estimated_prompt_tokens: number;
+  estimated_completion_tokens: number;
   estimated: boolean;
 };
 

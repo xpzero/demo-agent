@@ -51,6 +51,7 @@ class SessionStatsTests(unittest.TestCase):
                 "total_prompt_tokens": 0,
                 "total_completion_tokens": 0,
                 "estimated_prompt_tokens": 0,
+                "estimated_completion_tokens": 0,
                 "estimated": False,
             },
         )
@@ -79,6 +80,7 @@ class SessionStatsTests(unittest.TestCase):
         self.assertEqual(stats["total_completion_tokens"], 20)
         # 展示口径：估算列人人都有，缺失行用估算补位
         self.assertEqual(stats["estimated_prompt_tokens"], 300)
+        self.assertEqual(stats["estimated_completion_tokens"], 50)
         # 任一行缺实测即整体标 estimated
         self.assertTrue(stats["estimated"])
 
@@ -93,6 +95,19 @@ class SessionStatsTests(unittest.TestCase):
         stats = self.database.get_session_stats(self.session_id)
         self.assertFalse(stats["estimated"])
         self.assertEqual(stats["total_prompt_tokens"], 10)
+
+    def test_partial_usage_uses_estimate_only_for_missing_column(self):
+        self.record_for(
+            self.first_user_id,
+            prompt_tokens=0,
+            completion_tokens=None,
+            estimated_prompt_tokens=7,
+            estimated_completion_tokens=11,
+        )
+        stats = self.database.get_session_stats(self.session_id)
+        self.assertEqual(stats["estimated_prompt_tokens"], 0)
+        self.assertEqual(stats["estimated_completion_tokens"], 11)
+        self.assertTrue(stats["estimated"])
 
     def test_unknown_session_raises(self):
         from database.connection import StoreError

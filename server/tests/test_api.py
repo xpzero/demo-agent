@@ -67,6 +67,56 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(history["session"]["current_message_id"], messages[1]["id"])
         self.assertEqual(self.client.get("/api/sessions").json()["sessions"][0]["id"], self.session_id)
 
+    def test_tool_runs_survive_history_reload(self):
+        display = [
+            {"type": "text_delta", "text": "先查"},
+            {"type": "tool_call", "id": "call_1", "name": "get_weather", "args": {"city": "北京"}},
+            {"type": "tool_result", "id": "call_1", "content": "晴", "elapsed": 98.0},
+            {"type": "text_delta", "text": "今天晴"},
+        ]
+        def fake_stream(items, context=None, recorder=None):
+            from agent.metrics import ToolRecord
+            assert recorder is not None
+            turn = recorder.start_turn()
+            for event in display:
+                if event["type"] == "tool_result":
+                    turn.tools.append(ToolRecord(
+                        name="get_weather", args_excerpt="{'city': '北京'}",
+                        result_excerpt="晴", duration_ms=98.0, ok=True,
+                    ))
+                yield event
+            yield {"type": "done", "content": "今天晴"}
+
+        with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
+            response = self.client.post("/api/chat", json=self.payload())
+        self.assertEqual(response.status_code, 200)
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        runs = history["messages"][1]["tool_runs"]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["name"], "get_weather")
+        self.assertEqual(runs[0]["args_excerpt"], "{'city': '北京'}")
+        self.assertEqual(runs[0]["result_excerpt"], "晴")
+        self.assertEqual(runs[0]["duration_ms"], 98.0)
+        self.assertEqual(history["messages"][1]["content"], "今天晴")
+        self.assertEqual(self.database.get_message_chain(self.session_id, history["messages"][1]["id"])[-1]["content"], "今天晴")
+
+    def test_tool_runs_follow_their_user_turn_even_without_assistant_text(self):
+        from agent.metrics import ToolRecord
+
+        def fake_stream(items, context=None, recorder=None):
+            turn = recorder.start_turn()
+            turn.tools.append(ToolRecord(
+                name="get_weather", args_excerpt="{}", result_excerpt="晴",
+                duration_ms=12, ok=True,
+            ))
+            yield {"type": "done", "content": ""}
+
+        with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
+            self.client.post("/api/chat", json=self.payload())
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        self.assertEqual(history["messages"][1]["tool_runs"][0]["name"], "get_weather")
+        self.assertEqual(history["messages"][1]["content"], "")
+
     def test_stale_parent_is_rejected(self):
         first = self.database.create_user_turn(
             session_id=self.session_id,

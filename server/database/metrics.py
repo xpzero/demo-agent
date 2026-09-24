@@ -117,8 +117,8 @@ class MetricsStoreMixin:
 
         账本是唯一事实来源，能推导的数据不冗余存。
         - total_*：只累计有实测 usage 的行；
-        - estimated_prompt_tokens：展示口径，缺实测的行用估算列补位；
-        - estimated：任一行缺实测即 True。
+        - estimated_*：展示口径，每行优先实测，缺失时用估算补位；
+        - estimated：任一行有缺失实测即 True。
         """
         session_id = normalize_session_id(session_id)
         with self.connection() as connection:
@@ -134,9 +134,12 @@ class MetricsStoreMixin:
                     COALESCE(SUM(prompt_tokens), 0) AS total_prompt_tokens,
                     COALESCE(SUM(completion_tokens), 0)
                         AS total_completion_tokens,
-                    COALESCE(SUM(estimated_prompt_tokens), 0)
+                    COALESCE(SUM(COALESCE(prompt_tokens, estimated_prompt_tokens)), 0)
                         AS estimated_prompt_tokens,
-                    SUM(prompt_tokens IS NULL) AS missing_usage
+                    COALESCE(SUM(COALESCE(completion_tokens, estimated_completion_tokens)), 0)
+                        AS estimated_completion_tokens,
+                    SUM(prompt_tokens IS NULL OR completion_tokens IS NULL)
+                        AS missing_usage
                 FROM agent_turns
                 WHERE message_id IN (
                     SELECT id FROM chat_messages WHERE session_id = ?
@@ -150,7 +153,8 @@ class MetricsStoreMixin:
             "total_prompt_tokens": row["total_prompt_tokens"],
             "total_completion_tokens": row["total_completion_tokens"],
             "estimated_prompt_tokens": row["estimated_prompt_tokens"],
-            # 有账但全缺实测 → 纯估算；零账（空会话）不算 estimated
+            "estimated_completion_tokens": row["estimated_completion_tokens"],
+            # 任一用量缺实测即标记；零账（空会话）不算 estimated
             "estimated": bool(missing),
         }
 

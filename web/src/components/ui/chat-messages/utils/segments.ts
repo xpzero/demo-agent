@@ -4,8 +4,9 @@ export type ToolSegment = {
   kind: "tool";
   id: string;
   name: string;
-  args: { [key: string]: unknown } | null;
+  args: { [key: string]: unknown } | string | null;
   output: string | null;
+  excerpt: boolean;
   /** 工具执行耗时（毫秒），结果未返回时为 null。 */
   elapsed: number | null;
 };
@@ -29,7 +30,7 @@ export function deriveSegments(events: AgentEvent[]): Segment[] {
     } else if (event.type === "tool_call") {
       segments.push({
         kind: "tool", id: event.id, name: event.name,
-        args: event.args, output: null, elapsed: null,
+        args: event.args, output: null, elapsed: null, excerpt: event.excerpt ?? false,
       });
     } else if (event.type === "tool_result") {
       const tool = segments.find((item): item is ToolSegment => item.kind === "tool" && item.id === event.id);
