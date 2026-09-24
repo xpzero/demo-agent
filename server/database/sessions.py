@@ -18,6 +18,37 @@ class SessionStoreMixin:
 
     normalize_session_id = staticmethod(normalize_session_id)
 
+    def initialize_session_summary(self) -> None:
+        """迁移现有 SQLite 会话表，不改变已保存的原始消息。"""
+        with self.transaction() as connection:
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(chat_sessions)")}
+            if "summary" not in columns:
+                connection.execute("ALTER TABLE chat_sessions ADD COLUMN summary TEXT")
+            if "summary_upto_message_id" not in columns:
+                connection.execute("ALTER TABLE chat_sessions ADD COLUMN summary_upto_message_id INTEGER")
+
+    def get_session_summary(self, session_id: str) -> tuple[str | None, int | None] | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT summary, summary_upto_message_id FROM chat_sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+        return (row["summary"], row["summary_upto_message_id"]) if row else None
+
+    def update_session_summary(
+        self, session_id: str, previous_cursor: int | None,
+        summary: str, upto_message_id: int,
+    ) -> bool:
+        """用游标比较并覆盖一份摘要，避免并行摘要回写旧结果。"""
+        with self.transaction() as connection:
+            result = connection.execute(
+                """UPDATE chat_sessions SET summary = ?, summary_upto_message_id = ?
+                   WHERE id = ? AND summary_upto_message_id IS ?
+                     AND (summary_upto_message_id IS NULL OR summary_upto_message_id < ?)""",
+                (summary, upto_message_id, session_id, previous_cursor, upto_message_id),
+            )
+            return result.rowcount == 1
+
     def create_user_turn(
         self,
         *,
@@ -210,7 +241,8 @@ class SessionStoreMixin:
         with self.connection() as connection:
             session = connection.execute(
                 """
-                SELECT id, title, current_message_id, created_at, updated_at
+                SELECT id, title, current_message_id, summary, summary_upto_message_id,
+                       created_at, updated_at
                 FROM chat_sessions WHERE id = ?
                 """,
                 (session_id,),

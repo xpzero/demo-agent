@@ -1,29 +1,26 @@
-"""上下文预算控制：构造发给模型的 items 时的截断（trim）策略。
+"""会话上下文：保留原始消息链，用滚动摘要代表较早的消息。"""
 
-存储 ≠ 上下文：SQLite 存全量原文（前端历史展示的事实来源），
-本模块只决定「这一轮模型能看到什么」。token 估算用 len(text)
-一字一 token 的保守估算——对中文偏大、对英文更偏大，方向安全：
-宁可提前截断，不可超限报错。
-"""
+from .client import MODEL, client
 
 CONTEXT_BUDGET = 24_000
+ROLL_TRIGGER = 12_000
+RECENT_BUDGET = 8_000
+ABSORB_BUDGET = 8_000
+SUMMARY_MAX_TOKENS = 2_000
+SUMMARY_PREFIX = "以下是早期对话摘要：\n"
 
 
 def estimate_tokens(text: str) -> int:
-    """保守估算 token 数：一字一 token，不引入 tokenizer 依赖。"""
+    """保守估算 token 数；不引入 tokenizer。"""
     return len(text)
 
 
 def to_chat_messages(rows: list[dict]) -> list[dict]:
-    """把 chat_messages 链行（旧→新）映射成 Chat Completions 消息。"""
     return [{"role": row["role"], "content": row["content"]} for row in rows]
 
 
 def pick_recent_within(messages: list[dict], budget: int) -> list[dict]:
-    """从最新往回圈保留区，超预算丢最旧；至少保留最新一条。
-
-    链天然有序（父指针 + id 自增），「最旧」就是列表开头，不靠额外机制。
-    """
+    """从最新往回保留，至少保留一条。"""
     kept: list[dict] = []
     used = 0
     for message in reversed(messages):
@@ -37,14 +34,90 @@ def pick_recent_within(messages: list[dict], budget: int) -> list[dict]:
 
 
 def build_context(
-    system_prompt: str, chain_rows: list[dict], budget: int = CONTEXT_BUDGET
+    system_prompt: str, chain_rows: list[dict], budget: int = CONTEXT_BUDGET,
+    *, summary: str | None = None, summary_upto_message_id: int | None = None,
 ) -> list[dict]:
-    """构造本轮发给模型的 items：system 永在 + 截断后的历史。
+    """游标前由摘要代言，游标后按预算保留近期原话。"""
+    system = {"role": "system", "content": system_prompt}
+    summary_message = (
+        {"role": "user", "content": SUMMARY_PREFIX + summary}
+        if summary and summary_upto_message_id is not None else None
+    )
+    living = [row for row in chain_rows
+              if summary_upto_message_id is None or row["id"] > summary_upto_message_id]
+    reserved = estimate_tokens(system_prompt) + (
+        estimate_tokens(summary_message["content"]) if summary_message else 0
+    )
+    kept = pick_recent_within(to_chat_messages(living), max(0, budget - reserved))
+    return [system, *([summary_message] if summary_message else []), *kept]
 
-    system 的开销计入总预算。被截掉的最旧历史本轮对模型不可见，
-    但库里完整保留（摘要阶段引入后由摘要代言）。
-    """
-    system_message = {"role": "system", "content": system_prompt}
-    history_budget = max(0, budget - estimate_tokens(system_prompt))
-    kept = pick_recent_within(to_chat_messages(chain_rows), history_budget)
-    return [system_message, *kept]
+
+def choose_to_absorb(
+    living: list[dict], trigger: int = ROLL_TRIGGER,
+    recent_budget: int = RECENT_BUDGET, absorb_budget: int = ABSORB_BUDGET,
+) -> list[dict]:
+    """每次最多收编约 8K；积压时从游标之后最旧的部分逐次补吃。"""
+    if sum(estimate_tokens(row["content"]) for row in living) <= trigger:
+        return []
+    recent = pick_recent_within(living, recent_budget)
+    candidates = living[:len(living) - len(recent)]
+    chosen: list[dict] = []
+    used = 0
+    for row in candidates:
+        cost = estimate_tokens(row["content"])
+        if used + cost > absorb_budget:
+            if chosen:
+                break
+            # 单条原文超过上限时只向摘要模型提供前 8K，避免无限重试。
+            chosen.append({**row, "content": row["content"][:absorb_budget]})
+            break
+        chosen.append(row)
+        used += cost
+    return chosen
+
+
+def summarize(old_summary: str | None, rows: list[dict]) -> str:
+    """独立模型调用返回完整新摘要，不把摘要写入消息链。"""
+    previous = old_summary or "（无）"
+    transcript = "\n".join(f"{row['role']}: {row['content']}" for row in rows)
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": (
+                "合并旧摘要和新对话，输出一份完整的中文历史摘要。保留用户目标、决定、"
+                "具体数字、约束和未完成事项；省略寒暄及过程，不要编造。"
+            )},
+            {"role": "user", "content": f"旧摘要：\n{previous}\n\n新收编的对话：\n{transcript}"},
+        ],
+        max_tokens=SUMMARY_MAX_TOKENS,
+    )
+    text = response.choices[0].message.content
+    if not text or not text.strip():
+        raise ValueError("摘要模型返回空内容")
+    return text.strip()
+
+
+def needs_roll(database, session_id: str, upto_message_id: int) -> bool:
+    """快速检查触发线；避免短会话每轮启动一个后台线程。"""
+    state = database.get_session_summary(session_id)
+    if state is None:
+        return False
+    _, cursor = state
+    chain = database.get_message_chain(session_id, upto_message_id)
+    living = [row for row in chain if cursor is None or row["id"] > cursor]
+    return bool(choose_to_absorb(living))
+
+
+def maybe_roll(database, session_id: str, upto_message_id: int) -> bool:
+    """回复完成后的旁路任务；失败时不推进游标，下一轮继续尝试。"""
+    state = database.get_session_summary(session_id)
+    if state is None:
+        return False
+    old_summary, cursor = state
+    chain = database.get_message_chain(session_id, upto_message_id)
+    living = [row for row in chain if cursor is None or row["id"] > cursor]
+    batch = choose_to_absorb(living)
+    if not batch:
+        return False
+    new_summary = summarize(old_summary, batch)
+    return database.update_session_summary(session_id, cursor, new_summary, batch[-1]["id"])

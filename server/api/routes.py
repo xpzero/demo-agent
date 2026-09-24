@@ -139,7 +139,12 @@ def chat(body: ChatRequest):
     system_prompt = SYSTEM_PROMPT
     if session_files:
         system_prompt = f"{SYSTEM_PROMPT}\n{ATTACHED_DOCUMENT_RULE}"
-    items = build_context(system_prompt, chain)
+    summary_state = database.get_session_summary(session_id)
+    summary, summary_cursor = summary_state if summary_state is not None else (None, None)
+    items = build_context(
+        system_prompt, chain, summary=summary,
+        summary_upto_message_id=summary_cursor,
+    )
 
     def release_session():
         with _lock:

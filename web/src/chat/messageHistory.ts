@@ -23,6 +23,14 @@ export function historyToMessages(messages: SessionMessage[]): ChatMessage[] {
   );
 }
 
+export function compressionBoundaryIndex(messages: ChatMessage[], cursor: number | null): number {
+  if (cursor === null) {
+    return -1;
+  }
+  const last = messages.findLastIndex((message) => message.messageId !== undefined && message.messageId <= cursor);
+  return last >= 0 && last < messages.length - 1 ? last : -1;
+}
+
 export function syncMessageTimestamps(current: ChatMessage[], messages: SessionMessage[]): ChatMessage[] {
   const createdAtById = new Map(messages.map((message) => [message.id, message.created_at]));
   return current.map((message) => {

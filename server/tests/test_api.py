@@ -139,6 +139,32 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(history["session"]["current_message_id"], assistant)
         self.assertEqual(len(history["messages"]), 2)
 
+    def test_followup_includes_summary_and_history_exposes_cursor(self):
+        first = self.database.create_user_turn(
+            session_id=self.session_id, parent_message_id=None, content="old", file_ids=[]
+        )
+        assistant = self.database.add_assistant_message(
+            session_id=self.session_id, parent_message_id=first, content="old answer"
+        )
+        self.assertTrue(self.database.update_session_summary(self.session_id, None, "old context", assistant))
+        seen = []
+
+        def stream(items, context=None, recorder=None):
+            seen.extend(items)
+            yield {"type": "done", "content": "new answer"}
+
+        with patch.object(chat_stream, "stream_events", side_effect=stream):
+            response = self.client.post(
+                "/api/chat", json=self.payload(parent_message_id=assistant, message="new")
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["role"] for item in seen], ["system", "user", "user"])
+        self.assertIn("old context", seen[1]["content"])
+        self.assertEqual(seen[-1]["content"], "new")
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        self.assertEqual(history["session"]["summary_upto_message_id"], assistant)
+        self.assertEqual(len(history["messages"]), 4)
+
     def test_followup_uses_database_chain_and_parent(self):
         first = self.database.create_user_turn(
             session_id=self.session_id, parent_message_id=None, content="first", file_ids=[]

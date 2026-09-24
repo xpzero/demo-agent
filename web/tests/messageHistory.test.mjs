@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { historyToMessages, syncMessageTimestamps } from "../src/chat/messageHistory.ts";
+import { compressionBoundaryIndex, historyToMessages, syncMessageTimestamps } from "../src/chat/messageHistory.ts";
 
 test("历史消息按顺序恢复用户和助手文本", () => {
   const messages = historyToMessages([
@@ -31,6 +31,19 @@ test("空助手回复显示已完成，而不是持续思考中", () => {
   assert.deepEqual(historyToMessages([{ id: 8, role: "assistant", content: "", created_at: 1700000015 }]), [
     { kind: "assistant", id: "8", createdAt: 1700000015, messageId: 8, events: [{ type: "done", content: "", message_id: 8 }] },
   ]);
+});
+
+test("压缩分隔线只插在游标覆盖的最后一条原文后", () => {
+  const messages = [
+    { kind: "user", id: "a", messageId: 10 },
+    { kind: "assistant", id: "b", messageId: 11 },
+    { kind: "user", id: "c", messageId: 13 },
+    { kind: "assistant", id: "pending" },
+  ];
+  assert.equal(compressionBoundaryIndex(messages, null), -1);
+  assert.equal(compressionBoundaryIndex(messages, 11), 1);
+  assert.equal(compressionBoundaryIndex(messages, 12), 1);
+  assert.equal(compressionBoundaryIndex(messages.slice(0, 2), 11), -1);
 });
 
 test("校准实时消息时间时保留条目和流式事件", () => {

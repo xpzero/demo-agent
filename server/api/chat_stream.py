@@ -11,10 +11,12 @@ StreamingResponse）；这里负责一轮 Chat 的完整生命周期：
 
 import json
 import logging
+from threading import Thread
 from collections.abc import Iterator
 from pathlib import Path
 
 from agent import stream_events
+from agent.context_budget import maybe_roll, needs_roll
 from agent.metrics import TurnRecorder, export_turns, summarize_meta
 from database import Database
 from tools.context import SessionContext
@@ -24,6 +26,13 @@ logger = logging.getLogger(__name__)
 
 def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+def _roll_session(database: Database, session_id: str, message_id: int) -> None:
+    try:
+        maybe_roll(database, session_id, message_id)
+    except Exception as error:
+        logger.warning("摘要失败，下轮重试：%s: %s", type(error).__name__, error)
 
 
 def chat_sse_stream(
@@ -95,3 +104,13 @@ def chat_sse_stream(
                 "埋点落库失败：%s: %s", type(error).__name__, error
             )
         release_session()
+        if assistant_message_id is not None:
+            try:
+                if needs_roll(database, session_id, assistant_message_id):
+                    Thread(
+                        target=_roll_session,
+                        args=(database, session_id, assistant_message_id),
+                        daemon=True,
+                    ).start()
+            except Exception as error:
+                logger.warning("检查摘要触发失败，下轮重试：%s: %s", type(error).__name__, error)

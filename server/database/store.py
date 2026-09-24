@@ -13,4 +13,5 @@ class Database(ConnectionMixin, SessionStoreMixin, FileStoreMixin, MetricsStoreM
 
     def initialize(self) -> None:
         super().initialize()
+        self.initialize_session_summary()
         self.initialize_metrics()

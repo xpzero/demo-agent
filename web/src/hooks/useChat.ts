@@ -17,7 +17,7 @@ export function useChat(onConversationChanged: () => void) {
   const recoveryNeededRef = useRef(false);
   const setCurrentMessageId = useSessionStore((state) => state.setCurrentMessageId);
 
-  const { messages, setMessages, historyReady, loadingHistory, historyError, retryHistory } =
+  const { messages, setMessages, summaryCursor, setSummaryCursor, historyReady, loadingHistory, historyError, retryHistory } =
     useSessionMessages(sessionId, sessionGeneration);
 
   useEffect(() => {
@@ -82,6 +82,7 @@ export function useChat(onConversationChanged: () => void) {
           }
           return;
         }
+        setSummaryCursor(history.session.summary_upto_message_id);
         setMessages((prev) => syncMessageTimestamps(prev, history.messages));
       }).catch(() => {
         // Local timestamps remain visible if the reconciliation request fails.
@@ -93,6 +94,7 @@ export function useChat(onConversationChanged: () => void) {
     running,
     error,
     messages,
+    summaryCursor,
     send,
     historyReady,
     loadingHistory,
