@@ -279,3 +279,58 @@ class ChatApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionStatsApiTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.directory.name) / "test.sqlite3"
+        self.patches = [
+            patch.object(api.deps, "DATABASE_PATH", self.database_path),
+        ]
+        for item in self.patches:
+            item.start()
+        self.database = Database(self.database_path)
+        self.database.initialize()
+        self.client = TestClient(api.app)
+        self.session_id = str(uuid4())
+        self.user_id = self.database.create_user_turn(
+            session_id=self.session_id,
+            parent_message_id=None,
+            content="你好",
+            file_ids=[],
+        )
+
+    def tearDown(self):
+        for item in reversed(self.patches):
+            item.stop()
+        self.directory.cleanup()
+
+    def test_stats_endpoint_returns_aggregates(self):
+        self.database.record_agent_turns(
+            message_id=self.user_id,
+            turns=[
+                {
+                    "duration_ms": 100.0,
+                    "prompt_tokens": 50,
+                    "completion_tokens": 10,
+                    "estimated_prompt_tokens": 50,
+                    "estimated_completion_tokens": 10,
+                    "tools": [],
+                }
+            ],
+        )
+        response = self.client.get(f"/api/sessions/{self.session_id}/stats")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["turns"], 1)
+        self.assertEqual(body["total_prompt_tokens"], 50)
+        self.assertFalse(body["estimated"])
+
+    def test_stats_for_unknown_session_is_404(self):
+        response = self.client.get(f"/api/sessions/{uuid4()}/stats")
+        self.assertEqual(response.status_code, 404)
+
+    def test_stats_for_invalid_uuid_is_400(self):
+        response = self.client.get("/api/sessions/not-a-uuid/stats")
+        self.assertEqual(response.status_code, 400)

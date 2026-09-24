@@ -195,7 +195,7 @@ demo-agent/
 - **prompt injection 未真正防住**：`web_search` / `fetch_url` 引入的外部内容可能夹带指令，且现在没有任何写入前确认，模型可能被诱导改写文件
 - `write_file` 无确认直接覆盖文件，没有备份或事务，也还没有“读取外部内容后禁止写入”等隔离
 - 上下文长度控制目前只有纯截断（`agent/context_budget.py`，`len(text)` 一字一 token 保守估算、预算 24K、system 永在、至少保留最新一条）；被截掉的早期历史对模型不可见，滚动摘要尚未实现
-- 没有应用层重试策略；模型请求或流处理异常会转成 `error` 事件，但中断的任务不会自动续跑。可观测性埋点已上线（`agent/metrics.py` + `agent_turns`/`tool_runs` 表 + `chat_messages.meta`）：每轮记录模型请求耗时、流式 usage（智谱接口已验证支持 `include_usage`）与工具执行名/耗时/成败，落库失败只记日志不影响回复；stats 查询接口与前端展示待做
+- 没有应用层重试策略；模型请求或流处理异常会转成 `error` 事件，但中断的任务不会自动续跑。可观测性埋点已上线（`agent/metrics.py` + `agent_turns`/`tool_runs` 表 + `chat_messages.meta`）：每轮记录模型请求耗时、流式 usage（智谱接口已验证支持 `include_usage`）与工具执行名/耗时/成败，落库失败只记日志不影响回复；stats 查询接口已上线（GET /api/sessions/{id}/stats 现场聚合），前端展示待做
 - 300 秒整轮时限只在模型 chunk 边界与工具执行前后检查；已进入阻塞的工具调用无法被强行抢占，超时要等调用返回后才生效
 - HTTP 聊天用进程内标志与锁阻止并发运行；多 worker 或多进程部署不受支持
 
