@@ -1,14 +1,38 @@
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 from tools import TOOLS, execute_tool
 from tools.context import SessionContext
 
-from .client import MODEL, client
+from .client import FALLBACK_MODEL, MODEL, client
 from .metrics import ToolRecord, TurnRecorder, excerpt
 
 MAX_RUN_SECONDS = 300
+MAX_MODEL_ATTEMPTS = 3
+MAX_LOGICAL_REQUESTS = 10
+MODEL_REQUEST_SECONDS = 60
+
+
+class RunStopped(Exception):
+    """The caller requested a stop at a safe boundary."""
+
+
+class ModelRequestTimeout(Exception):
+    """Only this API attempt expired; the Run may still have time."""
+
+
+def _check_stop(should_stop: Callable[[], bool] | None) -> None:
+    if should_stop is not None and should_stop():
+        raise RunStopped()
+
+
+def _retryable(error: Exception) -> bool:
+    if isinstance(error, APIStatusError):
+        return error.status_code == 429 or error.status_code >= 500
+    return isinstance(error, (APIConnectionError, APITimeoutError))
 
 
 def _check_deadline(deadline: float) -> None:
@@ -26,6 +50,117 @@ CHAT_TOOLS = [
     for schema in TOOLS
 ]
 
+RECOVERY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "recovery_suggestion",
+        "description": "提出当前任务的结构化恢复建议；不会执行工具。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "intent": {"type": "string", "enum": ["reply", "resume", "verify", "modify_goal", "clarify"]},
+                "action": {"type": "string", "enum": ["reply", "execute", "verify", "modify_goal", "clarify"]},
+                "task_id": {"type": "string", "description": "候选任务 id，必须用字符串"},
+                "task_version": {"type": "integer"},
+                "operation_refs": {"type": "array", "items": {"type": "object"},
+                    "description": "必须完整列出该任务全部操作，每项只含 id（字符串）"},
+                "question": {"type": "string"}, "goal": {"type": "string"},
+                "operation_id": {"type": "string"}, "step_id": {"type": "string"},
+                "tool": {"type": "string"}, "args": {"type": "object"},
+            },
+            "required": ["intent", "action", "task_id", "task_version", "operation_refs"],
+        },
+    },
+}
+
+# 恢复答复的呈现只依据后端核对过的事实：outcome 摘要 + 操作事实行，
+# 模型自由文字在恢复模式下不透传，也不能成为业务结论来源。
+_RECOVERY_OUTCOME_SUMMARIES = {
+    "allow": "已核对当前任务事实。",
+    "skip": "该操作已有可靠结果，无需重复执行。",
+    "clarify": "需要你补充信息。",
+    "blocked": "当前无法执行该建议。",
+    "rejudge": "任务事实已变化，需要重新判断。",
+    "invalid": "恢复建议未通过核对。",
+    "adopted": "已更新任务目标。",
+    "observed": "已向业务系统核实。",
+}
+
+_OPERATION_STATUS_LABELS = {
+    "succeeded": "已成功",
+    "failed": "已失败",
+    "cancelled": "已确认取消",
+    "processing": "仍在处理中（截至本次核对）",
+    "maybe_submitted": "可能已提交，结果待核实（截至本次核对）",
+    "unconfirmed": "结果待核实（截至本次核对）",
+    "not_started": "尚未启动",
+}
+
+
+def _fact_line(fact: dict) -> str:
+    status = fact.get("status")
+    label = _OPERATION_STATUS_LABELS.get(status) if isinstance(status, str) else None
+    line = f"- 操作 {fact.get('id')}（步骤 {fact.get('step_id')}）：{label or '状态未知'}"
+    if fact.get("result"):
+        line += f"：{fact['result']}"
+    if fact.get("conflict"):
+        line += "；存在矛盾的业务反馈，待业务方核实"
+    return line
+
+
+def _compose_recovery_answer(verdict: dict) -> str:
+    """把核对后的结构化裁决组成用户可读的恢复答复。
+
+    输入是后端校验器的 JSON 裁决（含已核对的 Operation 事实），
+    输出是纯文本；不得把原始 JSON 或模型自由文字当作答复。
+    呈现操作事实时标注本次核对时间：答复反映核对时点的已知事实，
+    不是永久不变的结论（迟到业务反馈仍会更新最新事实）。
+    """
+    lines: list[str] = []
+    message = verdict.get("message")
+    if isinstance(message, str) and message.strip():
+        lines.append(message.strip())
+    outcome = verdict.get("outcome")
+    showed_facts = False
+    if outcome == "observed":
+        operation_id = verdict.get("operation_id")
+        status = verdict.get("status")
+        if verdict.get("conflict"):
+            lines.append(
+                f"业务操作 {operation_id} 收到矛盾反馈，"
+                f"保留已有结论（{verdict.get('confirmed_result')}），待业务方核实。"
+            )
+            showed_facts = True
+        elif status in ("succeeded", "failed", "cancelled"):
+            result = verdict.get("confirmed_result")
+            lines.append(
+                f"业务操作 {operation_id} {_OPERATION_STATUS_LABELS[status]}"
+                + (f"：{result}" if result else "")
+            )
+            showed_facts = True
+        else:
+            label = _OPERATION_STATUS_LABELS.get(status, "结果待核实")
+            lines.append(
+                f"业务操作 {operation_id} {label}；"
+                "不会自动重做该操作，也不会推进依赖它的步骤。"
+            )
+            showed_facts = True
+    else:
+        lines.append(_RECOVERY_OUTCOME_SUMMARIES.get(outcome, "恢复处理结束。"))
+        facts = verdict.get("facts")
+        if isinstance(facts, list) and facts:
+            lines.extend(_fact_line(fact) for fact in facts if isinstance(fact, dict))
+            showed_facts = True
+        elif outcome in ("blocked", "rejudge", "invalid", "skip"):
+            reason = verdict.get("reason")
+            if isinstance(reason, str) and reason.strip():
+                lines.append(reason)
+    if showed_facts:
+        lines.append(f"（以上为截至本次核对时间的已知事实，核对时间："
+                     f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}）")
+    return "\n".join(lines)
+
+
 # stream_events 产出的事件类型：
 #   {"type": "text_delta", "text": str}                文本增量
 #   {"type": "tool_call", "id": str, "name": str, "args": dict} 模型发起一次调用
@@ -33,6 +168,7 @@ CHAT_TOOLS = [
 #   {"type": "done", "content": str}                   模型给出最终回复
 #   {"type": "max_turns"}                              触发轮次上限
 #   {"type": "error", "message": str}                  请求或流处理失败
+#   {"type": "stopped"}                              调用方停止本轮
 
 
 def _merge_tool_call_delta(
@@ -58,7 +194,8 @@ def _merge_tool_call_delta(
 
 def _aggregate_stream(
     stream, text_parts: list[str], partial_tool_calls: dict[int, dict], deadline: float,
-    current_turn=None,
+    current_turn=None, should_stop: Callable[[], bool] | None = None,
+    request_deadline: float | None = None,
 ) -> Iterator[dict]:
     """消费模型的 chunk 流：文本增量向外透传，工具调用增量按 index 聚齐。
 
@@ -67,7 +204,12 @@ def _aggregate_stream(
     """
     # 工具调用参数按 chunk 增量到达，必须按 index 聚齐后再解析
     for chunk in stream:
-        _check_deadline(deadline)
+        _check_stop(should_stop)
+        now = time.monotonic()
+        if now >= deadline:
+            raise TimeoutError("本轮回复超时，请重试")
+        if request_deadline is not None and now >= request_deadline:
+            raise ModelRequestTimeout("单次模型请求超时")
         if current_turn is not None:
             usage = _extract_usage(chunk)
             if usage:
@@ -121,6 +263,9 @@ def _run_tool_calls(
     deadline: float,
     context: SessionContext | None,
     current_turn=None,
+    should_stop: Callable[[], bool] | None = None,
+    on_tool_attempt: Callable[[str, str, dict], Callable[[str, bool], None]] | None = None,
+    on_recovery_suggestion: Callable[[dict], str] | None = None,
 ) -> Iterator[dict]:
     """按模型给出的顺序逐个执行：结果写回 items，tool_call_id 原样复用。
 
@@ -129,14 +274,32 @@ def _run_tool_calls(
     """
     for tool_call, args in tool_calls_with_args:
         _check_deadline(deadline)
+        _check_stop(should_stop)
         yield {
             "type": "tool_call",
             "id": tool_call["id"],
             "name": tool_call["name"],
             "args": args,
         }
+        _check_stop(should_stop)
+        recovery = tool_call["name"] == "recovery_suggestion" and on_recovery_suggestion is not None
+        finish_attempt = (on_tool_attempt(tool_call["id"], tool_call["name"], args)
+                          if on_tool_attempt is not None and not recovery else None)
         tool_started = time.monotonic()
-        tool_output, tool_ok = execute_tool(tool_call["name"], args, context)
+        try:
+            if recovery:
+                tool_output, tool_ok = on_recovery_suggestion(args), True
+            else:
+                tool_output, tool_ok = execute_tool(tool_call["name"], args, context)
+        except BaseException as error:
+            if finish_attempt is not None:
+                finish_attempt(f"{type(error).__name__}: {error}", False)
+            raise
+        if finish_attempt is not None:
+            finish_attempt(tool_output, tool_ok)
+        items.append(
+            {"role": "tool", "tool_call_id": tool_call["id"], "content": tool_output}
+        )
         _check_deadline(deadline)
         tool_elapsed_ms = (time.monotonic() - tool_started) * 1000
         if current_turn is not None:
@@ -149,13 +312,6 @@ def _run_tool_calls(
                     ok=tool_ok,
                 )
             )
-        items.append(
-            {
-                "role": "tool",
-                "tool_call_id": tool_call["id"],
-                "content": tool_output,
-            }
-        )
         yield {
             "type": "tool_result",
             "id": tool_call["id"],
@@ -185,6 +341,14 @@ def stream_events(
     max_turns: int = 10,
     context: SessionContext | None = None,
     recorder: TurnRecorder | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    max_attempts: int = MAX_MODEL_ATTEMPTS,
+    fallback_model: str | None = FALLBACK_MODEL,
+    deadline_at: float | None = None,
+    on_model_attempt: Callable[[bool], None] | None = None,
+    on_tool_attempt: Callable[[str, str, dict], Callable[[str, bool], None]] | None = None,
+    on_recovery_suggestion: Callable[[dict], str] | None = None,
+    recovery_prompt: str | None = None,
 ) -> Iterator[dict]:
     """agent loop 的核心：流式请求模型、执行工具，把过程产出为结构化事件。
 
@@ -193,37 +357,157 @@ def stream_events(
     需要定位会话附件的工具使用，与事件流本身无关。
     recorder 携带内存账本（P0-2 埋点）：逐次模型请求的耗时与 usage、
     每个工具的名/耗时/成败记入其中，落库由调用方决定——loop 不碰库。
+    should_stop 在请求、流和工具边界检查；deadline_at 是 Unix 时间戳，
+    未传时限时 300 秒。max_attempts 限制单个逻辑请求的实际尝试次数；
+    fallback_model 只用于最后一次尝试。
     不做任何打印——HTTP 服务是事件流的消费方，这里只负责「发生了什么」，
     怎么呈现由调用方决定。
     """
-    deadline = time.monotonic() + MAX_RUN_SECONDS
+    remaining = MAX_RUN_SECONDS if deadline_at is None else max(0, deadline_at - time.time())
+    deadline = time.monotonic() + remaining
+    max_attempts = min(MAX_MODEL_ATTEMPTS, max(1, max_attempts))
+    max_turns = min(MAX_LOGICAL_REQUESTS, max(0, max_turns))
+    logical_requests = 0
+    recovery_retries = 0
     try:
-        for _ in range(max_turns):
-            _check_deadline(deadline)
-            current_turn = recorder.start_turn() if recorder is not None else None
-            if current_turn is not None:
-                current_turn.items_snapshot = [
-                    {**item} if isinstance(item, dict) else item
-                    for item in items
-                ]
-            stream = client.chat.completions.create(
-                model=MODEL,
-                messages=items,
-                tools=CHAT_TOOLS,
-                stream=True,
-                stream_options={"include_usage": True},
-            )
+        while logical_requests < max_turns:
+            logical_requests += 1
+            failures = 0
+            while True:
+                _check_stop(should_stop)
+                _check_deadline(deadline)
+                if on_model_attempt is not None:
+                    on_model_attempt(failures == 0)
+                current_turn = recorder.start_turn() if recorder is not None else None
+                if current_turn is not None:
+                    current_turn.items_snapshot = [
+                        {**item} if isinstance(item, dict) else item
+                        for item in items
+                    ]
+                text_parts: list[str] = []
+                partial_tool_calls: dict[int, dict] = {}
+                emitted = False
+                started = time.monotonic()
+                stream = None
+                try:
+                    model = (
+                        fallback_model
+                        if fallback_model and failures > 0 and failures == max_attempts - 1
+                        else MODEL
+                    )
+                    stream = client.chat.completions.create(
+                        model=model,
+                        messages=([{"role": "system", "content": recovery_prompt}] + items
+                                  if recovery_prompt is not None else items),
+                        tools=CHAT_TOOLS + [RECOVERY_TOOL] if recovery_prompt is not None else CHAT_TOOLS,
+                        stream=True,
+                        stream_options={"include_usage": True},
+                        timeout=min(MODEL_REQUEST_SECONDS, max(0, deadline - started)),
+                    )
+                    for event in _aggregate_stream(
+                        stream, text_parts, partial_tool_calls, deadline,
+                        current_turn=current_turn, should_stop=should_stop,
+                        request_deadline=started + MODEL_REQUEST_SECONDS,
+                    ):
+                        if recovery_prompt is None:
+                            emitted = True
+                            yield event
+                    if not partial_tool_calls:
+                        now = time.monotonic()
+                        if now >= deadline:
+                            raise TimeoutError("本轮回复超时，请重试")
+                        if now >= started + MODEL_REQUEST_SECONDS:
+                            raise ModelRequestTimeout("单次模型请求超时")
+                except Exception as error:
+                    if current_turn is not None:
+                        current_turn.ok = False
+                    if (emitted or text_parts or partial_tool_calls or
+                            not (_retryable(error) or isinstance(error, ModelRequestTimeout)) or
+                            failures + 1 >= max_attempts):
+                        raise
+                    failures += 1
+                    _check_deadline(deadline)
+                    _check_stop(should_stop)
+                    delay = min(0.25 * 2 ** (failures - 1), 1.0,
+                                max(0, deadline - time.monotonic()))
+                    if should_stop is None:
+                        time.sleep(delay)
+                    else:
+                        until = time.monotonic() + delay
+                        while time.monotonic() < until:
+                            _check_stop(should_stop)
+                            _check_deadline(deadline)
+                            time.sleep(min(0.05, until - time.monotonic()))
+                    continue
+                finally:
+                    if stream is not None and hasattr(stream, "close"):
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass  # Preserve the request's original failure.
+                    if current_turn is not None:
+                        current_turn.duration_ms = (time.monotonic() - started) * 1000
+                break
 
-            text_parts: list[str] = []
-            partial_tool_calls: dict[int, dict] = {}
-            started = time.monotonic()
-            yield from _aggregate_stream(
-                stream, text_parts, partial_tool_calls, deadline,
-                current_turn=current_turn,
-            )
-            if current_turn is not None:
-                current_turn.duration_ms = (time.monotonic() - started) * 1000
-
+            _check_stop(should_stop)
+            if recovery_prompt is not None:
+                _check_deadline(deadline)
+                if on_recovery_suggestion is None:
+                    raise ValueError("恢复判断缺少校验器")
+                tool_calls = [partial_tool_calls[index] for index in sorted(partial_tool_calls)]
+                if len(tool_calls) != 1 or tool_calls[0]["name"] != "recovery_suggestion":
+                    if recovery_retries < 1:
+                        # One corrective retry: nudge the model to use the tool.
+                        recovery_retries += 1
+                        items.append({"role": "assistant", "content": "".join(text_parts) or "(空回复)"})
+                        items.append({"role": "user", "content":
+                                      "上一条回复没有调用 recovery_suggestion 工具。"
+                                      "恢复判断必须且只能提交一个 recovery_suggestion 工具调用，不要输出普通文本。"})
+                        text_parts.clear()
+                        partial_tool_calls.clear()
+                        continue
+                    raise ValueError("恢复判断需要唯一的 recovery_suggestion")
+                suggestion = _parse_call_args(tool_calls)[0][1]
+                verdict = on_recovery_suggestion(suggestion)
+                _check_stop(should_stop)
+                _check_deadline(deadline)
+                if not isinstance(verdict, str):
+                    raise TypeError("恢复校验结果必须是文本")
+                try:
+                    parsed_verdict = json.loads(verdict)
+                    outcome = parsed_verdict["outcome"]
+                except (ValueError, TypeError, KeyError) as error:
+                    raise ValueError("恢复校验结果无效") from error
+                if outcome not in {"allow", "skip", "clarify", "blocked", "rejudge", "invalid", "observed", "adopted"}:
+                    raise ValueError("恢复校验结果无效")
+                # done.content 只呈现核对后的事实：由后端把结构化裁决
+                # 组成用户可读文本，原始 JSON 仅保留在 tool_result 中。
+                answer = _compose_recovery_answer(parsed_verdict)
+                if current_turn is not None:
+                    current_turn.reply_text = answer
+                yield {"type": "tool_call", "id": tool_calls[0]["id"],
+                       "name": "recovery_suggestion", "args": suggestion}
+                _check_stop(should_stop)
+                yield {"type": "tool_result", "id": tool_calls[0]["id"],
+                       "content": verdict, "elapsed": 0.0}
+                _check_stop(should_stop)
+                if outcome == "invalid":
+                    reason = str(parsed_verdict.get("reason") or "")
+                    if recovery_retries < 1:
+                        # Strict citation rarely succeeds on the first try;
+                        # give the model one corrective retry with the reason.
+                        recovery_retries += 1
+                        items.append({"role": "assistant", "content": answer or "(空回复)"})
+                        items.append({"role": "user", "content":
+                                      "上一个 recovery_suggestion 未通过校验：" + reason +
+                                      "。请严格按照任务事实重新提交一个 recovery_suggestion 工具调用，"
+                                      "operation_refs 必须完整引用该任务全部操作及其准确状态（succeeded/failed/cancelled/"
+                                      "processing/maybe_submitted/unconfirmed），task_id 用字符串。"})
+                        continue
+                    raise ValueError("恢复建议未通过校验")
+                items.append({"role": "assistant", "content": answer})
+                yield {"type": "done", "content": answer}
+                return
             if not partial_tool_calls:
                 reply = "".join(text_parts)
                 if current_turn is not None:
@@ -244,8 +528,25 @@ def stream_events(
             items.append(
                 _build_assistant_message("".join(text_parts), tool_calls)
             )
-            yield from _run_tool_calls(tool_calls_with_args, items, deadline, context, current_turn)
+            assistant_index = len(items) - 1
+            try:
+                yield from _run_tool_calls(
+                    tool_calls_with_args, items, deadline, context, current_turn,
+                    should_stop=should_stop, on_tool_attempt=on_tool_attempt,
+                    on_recovery_suggestion=on_recovery_suggestion,
+                )
+            except BaseException:
+                completed = len(items) - assistant_index - 1
+                if completed:
+                    items[assistant_index]["tool_calls"] = items[assistant_index]["tool_calls"][:completed]
+                else:
+                    items.pop()
+                raise
 
         yield {"type": "max_turns"}
+    except RunStopped:
+        yield {"type": "stopped"}
+    except TimeoutError as error:
+        yield {"type": "error", "code": "timed_out", "message": f"TimeoutError: {error}"}
     except Exception as error:
         yield {"type": "error", "message": f"{type(error).__name__}: {error}"}

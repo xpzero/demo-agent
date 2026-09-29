@@ -269,7 +269,7 @@ class StreamEventsTests(unittest.TestCase):
         # 序列: deadline=0, 轮前检查=1, 计时起点=2, 流中检查=301 → 超时
         with patch.object(loop.time, "monotonic", side_effect=[0, 1, 2, 301]):
             events, _, execute = self.run_with_streams(items, [[text_delta("late")]])
-        self.assertEqual(events, [{"type": "error", "message": "TimeoutError: 本轮回复超时，请重试"}])
+        self.assertEqual(events, [{"type": "error", "code": "timed_out", "message": "TimeoutError: 本轮回复超时，请重试"}])
         execute.assert_not_called()
 
     def test_slow_tool_does_not_start_next_model_request(self):
@@ -311,7 +311,7 @@ class StreamEventsTests(unittest.TestCase):
             events,
             [
                 {"type": "text_delta", "text": "partial"},
-                {"type": "error", "message": "TimeoutError: stream timed out"},
+                {"type": "error", "code": "timed_out", "message": "TimeoutError: stream timed out"},
             ],
         )
         self.assertEqual(len(requests), 1)
