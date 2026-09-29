@@ -97,8 +97,8 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(runs[0]["args_excerpt"], "{'city': '北京'}")
         self.assertEqual(runs[0]["result_excerpt"], "晴")
         self.assertEqual(runs[0]["duration_ms"], 98.0)
-        self.assertEqual(history["messages"][1]["content"], "今天晴")
-        self.assertEqual(self.database.get_message_chain(self.session_id, history["messages"][1]["id"])[-1]["content"], "今天晴")
+        self.assertEqual(history["messages"][1]["content"], "先查今天晴")
+        self.assertEqual(self.database.get_message_chain(self.session_id, history["messages"][1]["id"])[-1]["content"], "先查今天晴")
 
     def test_tool_runs_follow_their_user_turn_even_without_assistant_text(self):
         from agent.metrics import ToolRecord
@@ -191,14 +191,18 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(seen[-1]["content"], "second")
 
     def test_concurrent_and_validation_failures_do_not_write(self):
-        api._running_sessions.add(self.session_id)
-        self.assertEqual(self.client.post("/api/chat", json=self.payload()).status_code, 409)
-        api._running_sessions.clear()
+        busy_session = str(uuid4())
+        _, busy_run = self.database.create_run_turn(busy_session, None, "running", [])
+        busy = self.client.post("/api/chat", json=self.payload(session_id=busy_session))
+        self.assertEqual(busy.status_code, 409)
+        self.assertEqual(busy.json()["detail"]["code"], "session_busy")
+        self.assertEqual(len(self.database.get_session_history(busy_session)["messages"]), 1)
+        self.database.finish_run(busy_run, "stopped")
         response = self.client.post("/api/chat", json=self.payload(parent_message_id=123))
         self.assertEqual(response.status_code, 404)
         response = self.client.post("/api/chat", json=self.payload(ref_file_ids=["file_missing"]))
         self.assertEqual(response.status_code, 404)
-        self.assertEqual(self.client.get("/api/sessions").json()["sessions"], [])
+        self.assertIsNone(self.database.get_session_history(self.session_id))
         self.assertEqual(api._running_sessions, set())
 
     def test_failed_stream_keeps_user_message_as_parent(self):
@@ -250,7 +254,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(api._running_sessions, set())
 
     def test_assistant_persistence_failure_emits_error_not_done(self):
-        with patch.object(Database, "add_assistant_message", side_effect=RuntimeError("write failed")):
+        with patch.object(Database, "upsert_partial_assistant", side_effect=RuntimeError("write failed")):
             with patch.object(chat_stream, "stream_events", return_value=iter([
                 {"type": "done", "content": "answer"},
             ])):
