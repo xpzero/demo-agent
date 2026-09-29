@@ -1,6 +1,8 @@
 """会话域数据访问：会话、消息链与父指针约束。"""
 
+import json
 import time
+from contextlib import nullcontext
 from uuid import UUID
 
 from .connection import StoreError
@@ -57,13 +59,17 @@ class SessionStoreMixin:
         content: str,
         file_ids: list[str],
     ) -> int:
+        with self.transaction() as connection:
+            return self._create_user_turn(connection, session_id, parent_message_id, content, file_ids)
+
+    def _create_user_turn(self, connection, session_id, parent_message_id, content, file_ids):
         session_id = normalize_session_id(session_id)
         if len(file_ids) > 1:
             raise StoreError("too_many_files", "当前只支持单个附件")
         now = time.time()
         title = content.strip()[:30] or "新对话"
 
-        with self.transaction() as connection:
+        with nullcontext(connection):  # Reuse the caller's transaction.
             session = connection.execute(
                 "SELECT * FROM chat_sessions WHERE id = ?", (session_id,)
             ).fetchone()
@@ -286,3 +292,140 @@ class SessionStoreMixin:
                 message["files"] = [dict(file_row) for file_row in files]
                 messages.append(message)
         return {"session": dict(session), "messages": messages}
+
+    # 历史进度为只读快照：不改写任何持久化事实，Run 终态与结论
+    # 保持当时落库的值，Task/Operation 呈现最新已知状态。
+    _RUN_CONCLUSION_LABELS = {
+        "completed": "本轮消息处理完毕（完成不代表各业务操作都成功）",
+        "stopped": "应你的停止请求结束了本轮处理",
+        "failed": "后端未能完成本轮必要判断或答复",
+        "timed_out": "等待业务反馈达到总时限，本轮以超时结束",
+        "limit_reached": "达到模型请求次数上限，本轮结束",
+        "running": "正在处理本条消息",
+        "finishing": "正在收尾：核实在途业务操作并保存事实",
+    }
+
+    _PROGRESS_TASK_STATUS_LABELS = {
+        "pending": "已登记，尚未推进",
+        "running": "正在推进",
+        "active": "目标明确，可继续推进",
+        "waiting_input": "等待你补充信息",
+        "waiting_business": "已提交操作尚待业务方确认结束",
+        "completed": "目标已完成且必要结果已确认",
+    }
+
+    _PROGRESS_OPERATION_STATUS_LABELS = {
+        "pending": "not_started",
+        "maybe_submitted": "maybe_submitted",
+        "submitted": "maybe_submitted",
+        "processing": "processing",
+        "running": "processing",
+        "unknown": "unconfirmed",
+        "unconfirmed": "unconfirmed",
+        "succeeded": "succeeded",
+        "failed": "failed",
+        "cancelled": "cancelled",
+        "completed": "unconfirmed",
+    }
+
+    def _session_run_conclusions(self, connection, session_id: str) -> list[dict]:
+        rows = connection.execute(
+            """
+            SELECT id, user_message_id, status, reason, stop_requested,
+                   created_at, finished_at
+            FROM runs WHERE session_id = ? ORDER BY id
+            """,
+            (session_id,),
+        ).fetchall()
+        conclusions = []
+        for row in rows:
+            conclusion = dict(row)
+            label = self._RUN_CONCLUSION_LABELS.get(row["status"])
+            if label is None:
+                # 未知状态只说明记录不可解读，不推测业务结论
+                conclusion["conclusion"] = "运行记录状态未知"
+            elif row["status"] == "timed_out" and row["reason"] == "user_stop":
+                conclusion["conclusion"] = (
+                    "停止后等待业务反馈达到总时限，本轮以超时结束；"
+                    "未确认的操作保留待核实状态"
+                )
+            else:
+                conclusion["conclusion"] = label
+            conclusions.append(conclusion)
+        return conclusions
+
+    def _session_task_progress(self, connection, session_id: str) -> list[dict]:
+        tasks = connection.execute(
+            """
+            SELECT id, status, name, goal_version, created_at, updated_at
+            FROM tasks WHERE session_id = ? ORDER BY id
+            """,
+            (session_id,),
+        ).fetchall()
+        progress = []
+        for task in tasks:
+            entry = {
+                "id": task["id"],
+                "goal": task["name"],
+                "version": task["goal_version"],
+                "status": task["status"],
+                "status_label": self._PROGRESS_TASK_STATUS_LABELS.get(
+                    task["status"], "状态未知"
+                ),
+                "created_at": task["created_at"],
+                "updated_at": task["updated_at"],
+                "operations": [],
+                "steps": [],
+            }
+            for op in connection.execute(
+                """
+                SELECT id, run_id, step_id, name, status, conflict,
+                       confirmed_result, business_operation_id, updated_at
+                FROM operations WHERE task_id = ? ORDER BY id
+                """,
+                (task["id"],),
+            ).fetchall():
+                entry["operations"].append({
+                    "id": op["id"],
+                    "run_id": op["run_id"],
+                    "step_id": op["step_id"],
+                    "tool": op["name"],
+                    # 状态语义与恢复快照一致：可靠结果只来自已确认事实
+                    "status": self._PROGRESS_OPERATION_STATUS_LABELS.get(
+                        op["status"], "unconfirmed"
+                    ),
+                    "conflict": bool(op["conflict"]),
+                    "confirmed_result": op["confirmed_result"],
+                    "business_operation_id": op["business_operation_id"],
+                    "updated_at": op["updated_at"],
+                })
+            for step in connection.execute(
+                """
+                SELECT step_id, tool, args_json, depends_on, approved
+                FROM planned_steps WHERE task_id = ? ORDER BY created_at, step_id
+                """,
+                (task["id"],),
+            ).fetchall():
+                entry["steps"].append({
+                    "step_id": step["step_id"],
+                    "tool": step["tool"],
+                    "args": json.loads(step["args_json"]) if step["args_json"] else {},
+                    "depends_on": json.loads(step["depends_on"]) if step["depends_on"] else [],
+                    "approved": bool(step["approved"]),
+                })
+            progress.append(entry)
+        return progress
+
+    def get_session_progress(self, session_id: str) -> dict | None:
+        """只读快照：Run 结论 + Task/Operation 最新事实，供历史查询展示。"""
+        session_id = normalize_session_id(session_id)
+        with self.connection() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM chat_sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if exists is None:
+                return None
+            return {
+                "runs": self._session_run_conclusions(connection, session_id),
+                "tasks": self._session_task_progress(connection, session_id),
+            }
