@@ -1,6 +1,7 @@
-import { API_BASE, readSse, responseError } from "./transport";
+import { API_BASE, readSse, responseError } from "./transport.ts";
 import type { AgentEvent } from "./types";
 
+export { HttpError } from "./transport.ts";
 export type { AgentEvent } from "./types";
 
 export type SessionSummary = {
@@ -29,6 +30,7 @@ export type SessionHistory = {
     summary_upto_message_id: number | null;
   };
   messages: SessionMessage[];
+  can_send_message: boolean;
 };
 
 /** 会话级观测汇总（GET /api/sessions/{id}/stats 现场聚合）。 */
@@ -61,7 +63,9 @@ export async function getSessionStats(
 
 export async function listSessions(signal?: AbortSignal): Promise<SessionSummary[]> {
   const response = await fetch(`${API_BASE}/api/sessions`, { signal });
-  if (!response.ok) throw await responseError(response);
+  if (!response.ok) {
+    throw await responseError(response);
+  }
   const data = (await response.json()) as { sessions: SessionSummary[] };
   return data.sessions;
 }
@@ -79,6 +83,28 @@ export async function getSessionHistory(
     throw await responseError(response);
   }
   return (await response.json()) as SessionHistory;
+}
+
+export type SessionStatus = { processing: boolean; can_send_message: boolean };
+export type StopResult = { result: "processing" | "ended" | "no_active_request" };
+
+export async function getSessionStatus(sessionId: string, signal?: AbortSignal): Promise<SessionStatus | null> {
+  const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/status`, { signal });
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw await responseError(response);
+  }
+  return await response.json() as SessionStatus;
+}
+
+export async function stopSession(sessionId: string, signal?: AbortSignal): Promise<StopResult> {
+  const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/stop`, { method: "POST", signal });
+  if (!response.ok) {
+    throw await responseError(response);
+  }
+  return await response.json() as StopResult;
 }
 
 export type ChatPayload = {
@@ -99,6 +125,8 @@ export async function streamChat(
     body: JSON.stringify(payload),
     signal,
   });
-  if (!response.ok || !response.body) throw await responseError(response);
+  if (!response.ok || !response.body) {
+    throw await responseError(response);
+  }
   return readSse(response.body);
 }

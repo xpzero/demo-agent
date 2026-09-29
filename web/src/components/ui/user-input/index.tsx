@@ -14,14 +14,17 @@ import {
 
 interface UserInputProps {
   /** 发送一条消息 */
-  onSend: (text: string, refFileIds: string[]) => void;
+  onSend: (text: string, refFileIds: string[], onAccepted: () => void) => Promise<void>;
+  canSend: boolean;
+  onStop: () => Promise<void>;
+  stopping: boolean;
   /** 是否有请求正在运行 */
   running: boolean;
   /** 当前会话的消息历史已准备好 */
   historyReady: boolean;
 }
 
-export default function UserInput({ onSend, running, historyReady }: UserInputProps) {
+export default function UserInput({ onSend, running, historyReady, canSend, onStop, stopping }: UserInputProps) {
   const ref = useRef<HTMLDivElement>(null);
   const didAutoFocus = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -36,18 +39,21 @@ export default function UserInput({ onSend, running, historyReady }: UserInputPr
     setText(event.currentTarget.textContent ?? "");
   };
 
-  // 空文本或运行中不发送；发送后清空输入框
+  // POST 被接受后才清空草稿与附件，409 保留原输入。
   const submit = () => {
-    if (!text.trim() || running) {
+    if (!text.trim() || running || !canSend || !historyReady) {
       return;
     }
     const refFileIds =
       uploadState.status === "uploaded" ? [uploadState.document.file_id] : [];
-    onSend(text, refFileIds);
-    clear();
-    if (refFileIds.length > 0) {
-      documentUpload.reset();
-    }
+    void onSend(text, refFileIds, () => {
+      if (useUserInputStore.getState().text === text) {
+        clear();
+      }
+      if (refFileIds.length > 0) {
+        documentUpload.reset();
+      }
+    });
   };
 
   // Enter 发送，Shift+Enter 换行；中文输入法选词确认的 Enter 不触发发送
@@ -84,7 +90,9 @@ export default function UserInput({ onSend, running, historyReady }: UserInputPr
       !historyReady ||
       didAutoFocus.current ||
       !window.matchMedia("(min-width: 768px)").matches
-    ) return;
+    ) {
+      return;
+    }
     ref.current?.focus({ preventScroll: true });
     didAutoFocus.current = true;
   }, [historyReady]);
@@ -141,7 +149,12 @@ export default function UserInput({ onSend, running, historyReady }: UserInputPr
           </Tooltip>
         </div>
         <div className={styles.userInputHandleAreaRight}>
-          <Button onClick={submit} disabled={running}>
+          {historyReady && (running || !canSend) && (
+            <Button variant="outline" onClick={() => { void onStop(); }} disabled={stopping}>
+              {stopping ? "停止中…" : "停止"}
+            </Button>
+          )}
+          <Button onClick={submit} disabled={running || !canSend || !historyReady || !text.trim()}>
             发送
           </Button>
         </div>

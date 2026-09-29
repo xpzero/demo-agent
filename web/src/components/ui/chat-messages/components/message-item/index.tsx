@@ -18,7 +18,7 @@ export default function MessageItem({ message }: { message: ChatMessage }) {
               </BubbleContent>
             </Bubble>
           ) : (
-            <AssistantMessageBody events={message.events} completed={message.messageId !== undefined} />
+            <AssistantMessageBody events={message.events} completed={!message.incomplete && message.messageId !== undefined} />
           )}
           <MessageMeta message={message} />
         </MessageContent>

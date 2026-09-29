@@ -16,16 +16,19 @@ export function useSessionMessages(sessionId: string, sessionGeneration: number)
   const [summaryCursor, setSummaryCursor] = useState<number | null>(null);
   const [state, setState] = useState<HistoryState>({ generation: -1, status: "loading", error: "" });
   const [retryCount, setRetryCount] = useState(0);
+  const [canSend, setCanSend] = useState(false);
   const setCurrentMessageId = useSessionStore((store) => store.setCurrentMessageId);
 
   useEffect(() => {
     const controller = new AbortController();
     setMessages([]);
+    setCanSend(false);
     setSummaryCursor(null);
     setState({ generation: sessionGeneration, status: "loading", error: "" });
 
     if (useSessionStore.getState().isNewSession) {
       setCurrentMessageId(null);
+      setCanSend(true);
       setState({ generation: sessionGeneration, status: "ready", error: "" });
     } else {
       void getSessionHistory(sessionId, controller.signal).then((history) => {
@@ -38,6 +41,7 @@ export function useSessionMessages(sessionId: string, sessionGeneration: number)
         setCurrentMessageId(history.session.current_message_id);
         setSummaryCursor(history.session.summary_upto_message_id);
         setMessages(historyToMessages(history.messages));
+        setCanSend(history.can_send_message);
         setState({ generation: sessionGeneration, status: "ready", error: "" });
       }).catch((cause: unknown) => {
         if (controller.signal.aborted || useSessionStore.getState().sessionGeneration !== sessionGeneration) {
@@ -61,6 +65,8 @@ export function useSessionMessages(sessionId: string, sessionGeneration: number)
     summaryCursor: historyReady ? summaryCursor : null,
     setSummaryCursor,
     setMessages,
+    canSend: historyReady && canSend,
+    setCanSend,
     historyReady,
     loadingHistory: !current || state.status === "loading",
     historyError: current && state.status === "error" ? state.error : "",

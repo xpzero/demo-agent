@@ -21,7 +21,7 @@ export default function App() {
   const { sessions, loading, error: sessionsError, refresh } = useSessions();
   const { stats, refreshStats } = useSessionStats();
   const {
-    running, error, messages, summaryCursor, send, historyReady, loadingHistory, historyError, retryHistory,
+    running, stopping, stop, canSend, statusMessage, error, messages, summaryCursor, send, historyReady, loadingHistory, historyError, retryHistory,
   } = useChat(() => {
     void refresh();
     refreshStats();
@@ -78,12 +78,16 @@ export default function App() {
               </div>
             )}
             {error && <p className="text-sm text-red-500">{error}</p>}
+            {statusMessage && <p role="status" className="text-sm text-muted-foreground">{statusMessage}</p>}
 
             <div className="flex w-full shrink-0 justify-center">
               <UserInput
                 key={sessionGeneration}
                 onSend={send}
-                running={running || !historyReady}
+                running={running}
+                canSend={canSend}
+                onStop={stop}
+                stopping={stopping}
                 historyReady={historyReady}
               />
             </div>

@@ -7,6 +7,7 @@ import ToolCallCard from "../tool-call-card";
 /** 从助手事件流派生正文分段及工具执行后的等待状态。 */
 export default function AssistantMessageBody({ events, completed }: { events: AgentEvent[]; completed: boolean }) {
   const segments = deriveSegments(events);
+  const incomplete = !completed && !isAwaitingReply(events, completed);
   return (
     <>
       {segments.map((segment, index) => {
@@ -28,6 +29,11 @@ export default function AssistantMessageBody({ events, completed }: { events: Ag
           return <ToolCallCard key={index} segment={segment} />;
         }
       })}
+      {incomplete && (
+        <Marker className="text-xs">
+          <MarkerContent>回复未完成，已按中断时内容保存</MarkerContent>
+        </Marker>
+      )}
       {isAwaitingReply(events, completed) && (
         <Marker>
           <MarkerIcon><Spinner /></MarkerIcon>

@@ -42,6 +42,10 @@ export function applyChatEvent(
       ...(event.type === "done" && event.content
         ? { messageId: event.message_id, createdAt }
         : {}),
+      // error 终止且服务端尚未回传落库 ID 时，本地按未完成展示，等待历史校准。
+      ...(event.type === "error" && assistant.messageId === undefined
+        ? { incomplete: true }
+        : {}),
     };
   }
   return next;

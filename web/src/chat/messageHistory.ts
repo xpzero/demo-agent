@@ -10,13 +10,14 @@ export function historyToMessages(messages: SessionMessage[]): ChatMessage[] {
           id: String(message.id),
           createdAt: message.created_at,
           messageId: message.id,
+          ...(message.status === "incomplete" ? { incomplete: true } : {}),
           events: [
             ...(message.tool_runs ?? []).flatMap((run) => [
               { type: "tool_call" as const, id: String(run.id), name: run.name, args: run.args_excerpt, excerpt: true },
               { type: "tool_result" as const, id: String(run.id), content: run.result_excerpt, elapsed: run.duration_ms ?? undefined },
             ]),
             ...(message.content ? [{ type: "text_delta" as const, text: message.content }] : []),
-            ...(!message.content && !message.tool_runs?.length
+            ...(!message.content && !message.tool_runs?.length && message.status !== "incomplete"
               ? [{ type: "done" as const, content: "", message_id: message.id }] : []),
           ],
         },
@@ -29,6 +30,45 @@ export function compressionBoundaryIndex(messages: ChatMessage[], cursor: number
   }
   const last = messages.findLastIndex((message) => message.messageId !== undefined && message.messageId <= cursor);
   return last >= 0 && last < messages.length - 1 ? last : -1;
+}
+
+/**
+ * 终止事件（done/error）后用服务端落库事实校准本轮：正文、完成状态、工具存档
+ * 与消息 ID 以历史记录为准，替换本地流式展示的临时回合。找不到对应落库记录时
+ * 保留本地展示，不伪造服务端事实。
+ */
+export function reconcileTurnFromHistory(
+  current: ChatMessage[],
+  history: SessionMessage[],
+  ids: { userId: string; assistantId: string },
+): ChatMessage[] {
+  const userIndex = current.findIndex((message) => message.id === ids.userId);
+  if (userIndex === -1) {
+    return current;
+  }
+  const user = current[userIndex];
+  if (user.kind !== "user") {
+    return current;
+  }
+  const assistant = current[userIndex + 1];
+  if (assistant?.kind !== "assistant" || assistant.id !== ids.assistantId) {
+    return current;
+  }
+  const persistedUser = user.messageId == null ? undefined : history.find((message) => message.id === user.messageId);
+  if (!persistedUser) {
+    return current;
+  }
+  // 同一父消息可能存在中断保存的未完成记录；优先取已完成/失败的那条。
+  const candidates = history.filter((message) => message.role === "assistant" && message.parent_id === persistedUser.id);
+  const persisted = candidates.find((message) => message.status !== "incomplete") ?? candidates.at(-1);
+  if (!persisted) {
+    return current;
+  }
+  const [reconciledUser, reconciledAssistant] = historyToMessages([persistedUser, persisted]);
+  const next = [...current];
+  next[userIndex] = reconciledUser;
+  next[userIndex + 1] = reconciledAssistant;
+  return next;
 }
 
 export function syncMessageTimestamps(current: ChatMessage[], messages: SessionMessage[]): ChatMessage[] {
