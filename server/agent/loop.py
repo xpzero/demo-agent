@@ -24,6 +24,10 @@ class ModelRequestTimeout(Exception):
     """Only this API attempt expired; the Run may still have time."""
 
 
+class RecoveryFormatError(ValueError):
+    """恢复模式下模型输出不符合 recovery_suggestion 协议（可安全重试）。"""
+
+
 def _check_stop(should_stop: Callable[[], bool] | None) -> None:
     if should_stop is not None and should_stop():
         raise RunStopped()
@@ -453,7 +457,7 @@ def stream_events(
             if recovery_prompt is not None:
                 _check_deadline(deadline)
                 if on_recovery_suggestion is None:
-                    raise ValueError("恢复判断缺少校验器")
+                    raise RecoveryFormatError("恢复判断缺少校验器")
                 tool_calls = [partial_tool_calls[index] for index in sorted(partial_tool_calls)]
                 if len(tool_calls) != 1 or tool_calls[0]["name"] != "recovery_suggestion":
                     if recovery_retries < 1:
@@ -466,7 +470,7 @@ def stream_events(
                         text_parts.clear()
                         partial_tool_calls.clear()
                         continue
-                    raise ValueError("恢复判断需要唯一的 recovery_suggestion")
+                    raise RecoveryFormatError("恢复判断需要唯一的 recovery_suggestion")
                 suggestion = _parse_call_args(tool_calls)[0][1]
                 verdict = on_recovery_suggestion(suggestion)
                 _check_stop(should_stop)
@@ -477,9 +481,9 @@ def stream_events(
                     parsed_verdict = json.loads(verdict)
                     outcome = parsed_verdict["outcome"]
                 except (ValueError, TypeError, KeyError) as error:
-                    raise ValueError("恢复校验结果无效") from error
+                    raise RecoveryFormatError("恢复校验结果无效") from error
                 if outcome not in {"allow", "skip", "clarify", "blocked", "rejudge", "invalid", "observed", "adopted"}:
-                    raise ValueError("恢复校验结果无效")
+                    raise RecoveryFormatError("恢复校验结果无效")
                 # done.content 只呈现核对后的事实：由后端把结构化裁决
                 # 组成用户可读文本，原始 JSON 仅保留在 tool_result 中。
                 answer = _compose_recovery_answer(parsed_verdict)
@@ -504,7 +508,7 @@ def stream_events(
                                       "operation_refs 必须完整引用该任务全部操作及其准确状态（succeeded/failed/cancelled/"
                                       "processing/maybe_submitted/unconfirmed），task_id 用字符串。"})
                         continue
-                    raise ValueError("恢复建议未通过校验")
+                    raise RecoveryFormatError("恢复建议未通过校验")
                 items.append({"role": "assistant", "content": answer})
                 yield {"type": "done", "content": answer}
                 return

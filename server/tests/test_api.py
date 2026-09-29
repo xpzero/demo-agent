@@ -264,6 +264,23 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(len(self.client.get(f"/api/sessions/{self.session_id}").json()["messages"]), 1)
         self.assertEqual(api._running_sessions, set())
 
+    def test_recovery_format_error_maps_to_retryable_user_message(self):
+        # RecoveryFormatError 走面向用户的重试提示，不泄漏异常文本；
+        # 普通 ValueError 保持原始异常形态。
+        from agent.loop import RecoveryFormatError
+
+        def broken(_items, **_kwargs):
+            raise RecoveryFormatError("恢复判断需要唯一的 recovery_suggestion")
+            yield
+
+        with patch.object(chat_stream, "stream_events", side_effect=broken):
+            response = self.client.post("/api/chat", json=self.payload())
+        events = self.events(response)
+        self.assertEqual([event["type"] for event in events], ["user_message", "error"])
+        self.assertEqual(events[-1]["message"],
+                         "本次未能完成恢复判断：模型没有按要求提交结构化建议。请再发送一次“继续”重试。")
+        self.assertEqual(api._running_sessions, set())
+
     def test_history_missing_and_invalid_uuid(self):
         self.assertEqual(self.client.get(f"/api/sessions/{self.session_id}").status_code, 404)
         self.assertEqual(self.client.get("/api/sessions/not-a-uuid").status_code, 400)

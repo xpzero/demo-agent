@@ -20,6 +20,7 @@ from pathlib import Path
 
 from agent import stream_events
 from agent.context_budget import maybe_roll, needs_roll
+from agent.loop import MAX_LOGICAL_REQUESTS, MAX_RUN_SECONDS, RecoveryFormatError
 from agent.metrics import TurnRecorder, export_turns, summarize_meta
 from database import Database
 from database.connection import StoreError
@@ -29,6 +30,20 @@ from recovery.reconciler import start_reconciliation
 from tools.context import SessionContext
 
 logger = logging.getLogger(__name__)
+
+# 数据库 Task/Operation 状态 → 恢复快照用的规范化状态
+_TASK_SNAPSHOT_STATUS = {
+    "pending": "active", "running": "active", "active": "active",
+    "waiting_input": "waiting_input", "waiting_business": "waiting_business",
+    "completed": "completed",
+}
+_OPERATION_SNAPSHOT_STATUS = {
+    "pending": "not_started", "running": "processing",
+    "maybe_submitted": "maybe_submitted", "processing": "processing",
+    "unknown": "unconfirmed", "unconfirmed": "unconfirmed",
+    "succeeded": "succeeded", "failed": "failed", "cancelled": "cancelled",
+    "completed": "unconfirmed",
+}
 
 
 def _sse(event: dict) -> str:
@@ -52,9 +67,7 @@ def _task_snapshot(database: Database, session_id: str, run_id: int, message: st
     for row in database.list_session_tasks(session_id):
         if row["session_id"] != session_id:
             raise StoreError("invalid_task", "任务不属于当前会话", 409)
-        status = {"pending": "active", "running": "active", "active": "active",
-                  "waiting_input": "waiting_input", "waiting_business": "waiting_business",
-                  "completed": "completed"}.get(row["status"])
+        status = _TASK_SNAPSHOT_STATUS.get(row["status"])
         if status is None:
             raise StoreError("invalid_task", "任务状态无法核实", 409)
         operations = []
@@ -64,11 +77,7 @@ def _task_snapshot(database: Database, session_id: str, run_id: int, message: st
                 # Older operation rows have no goal_version; do not infer one
                 # from the Task's current version after a revision.
                 raise StoreError("incomplete_evidence", "操作所属目标版本无法核实", 409)
-            state = {"pending": "not_started", "running": "processing",
-                     "maybe_submitted": "maybe_submitted", "processing": "processing",
-                     "unknown": "unconfirmed", "unconfirmed": "unconfirmed",
-                     "succeeded": "succeeded", "failed": "failed", "cancelled": "cancelled",
-                     "completed": "unconfirmed"}.get(op["status"])
+            state = _OPERATION_SNAPSHOT_STATUS.get(op["status"])
             if state is None or (state in ("succeeded", "failed", "cancelled")
                                  and op["confirmed_result"] is None
                                  and not op["reliable"]):
@@ -104,7 +113,7 @@ def _task_snapshot(database: Database, session_id: str, run_id: int, message: st
     return build_task_snapshot(
         session_id, message, tuple(tasks), run_state=run["status"],
         stop_requested=bool(run["stop_requested"]),
-        budget_available=(run["logical_count"] <= 10 and
+        budget_available=(run["logical_count"] <= MAX_LOGICAL_REQUESTS and
                           (run["deadline_at"] is None or run["deadline_at"] > time.time())),
     )
 
@@ -350,7 +359,7 @@ def chat_sse_stream(
         message = f"回复中断：{type(error).__name__}: {error}"
         # Recovery-gate failures are model format issues, not system crashes:
         # tell the user what to do instead of leaking exception text.
-        if "recovery_suggestion" in str(error):
+        if isinstance(error, RecoveryFormatError):
             message = "本次未能完成恢复判断：模型没有按要求提交结构化建议。请再发送一次“继续”重试。"
         yield _sse({"type": "error", "message": message})
     finally:
@@ -392,7 +401,7 @@ def chat_sse_stream(
             try:
                 current = database.get_run(run_id)
                 if current is not None and current["status"] in ("running", "finishing"):
-                    deadline = current["deadline_at"] or current["created_at"] + 300
+                    deadline = current["deadline_at"] or current["created_at"] + MAX_RUN_SECONDS
                     _schedule_reconciliation(database, run_id, deadline)
             except Exception:
                 logger.exception("兜底核对安排失败：run_id=%s", run_id)
