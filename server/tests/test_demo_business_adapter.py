@@ -59,7 +59,7 @@ class DemoBusinessFlow(unittest.TestCase):
             try:
                 with patch.object(routes, "get_database", return_value=db), patch.object(loop, "client", model):
                     with TestClient(routes.app) as client:
-                        before = client.get(f"/api/sessions/{session}/status").json()
+                        before = client.get(f"/api/sessions/{session}").json()
                         self.assertTrue(before["can_send_message"])
                         with client.stream("POST", "/api/chat", json={
                             "session_id": session, "parent_message_id": first_user,
@@ -68,7 +68,7 @@ class DemoBusinessFlow(unittest.TestCase):
                             self.assertEqual(response.status_code, 200)
                             events = [json.loads(line[6:]) for line in response.iter_lines()
                                       if line.startswith("data: ")]
-                        status = client.get(f"/api/sessions/{session}/status").json()
+                        status = client.get(f"/api/sessions/{session}").json()
                         history = client.get(f"/api/sessions/{session}").json()
                 self.assertEqual([e["type"] for e in events],
                                  ["user_message", "tool_call", "tool_result", "done"])
@@ -76,7 +76,7 @@ class DemoBusinessFlow(unittest.TestCase):
                 self.assertEqual(verdict["status"], "succeeded")
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(db.get_run(db.list_operations(task)[0]["run_id"])["status"], "completed")
-                self.assertEqual(status, {"processing": False, "can_send_message": True})
+                self.assertTrue(status["can_send_message"])
                 self.assertTrue(history["can_send_message"])
                 self.assertEqual(history["messages"][-1]["role"], "assistant")
                 op = db.list_operations(task)[0]
@@ -121,7 +121,7 @@ class DemoBusinessFlow(unittest.TestCase):
                         events = [json.loads(line[6:]) for line in response.text.splitlines()
                                   if line.startswith("data: ")]
                         self.assertEqual(events[-1]["type"], "error")
-                        self.assertFalse(client.get(f"/api/sessions/{session}/status").json()["can_send_message"])
+                        self.assertFalse(client.get(f"/api/sessions/{session}").json()["can_send_message"])
                         rejected = client.post("/api/chat", json={
                             "session_id": session, "parent_message_id": first_user, "message": "再来一次"})
                         self.assertEqual(rejected.status_code, 409)

@@ -46,7 +46,7 @@ class ChatApiTests(unittest.TestCase):
         }
 
     def events(self, response):
-        return [json.loads(frame.removeprefix("data: ")) for frame in response.text.strip().split("\n\n")]
+        return [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
 
     def test_first_chat_creates_session_and_persists_assistant(self):
         with patch.object(chat_stream, "stream_events", return_value=iter([

@@ -5,7 +5,7 @@ from queue import Queue
 from threading import Event, Thread, Timer
 import time
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -19,6 +19,8 @@ from documents.cleanup import cleanup_files
 from tools.context import SessionContext  # noqa: F401  re-export for readability
 
 from .chat_stream import chat_sse_stream
+from .event_buffer import buffers
+from .resume_stream import resume_response, session_history, watch_terminal
 from . import deps
 from .deps import _lock, _running_sessions, get_database
 from recovery.reconciler import start_reconciliation
@@ -102,32 +104,17 @@ def get_session(session_id: str):
         session_id = database.normalize_session_id(session_id)
     except StoreError as error:
         raise _http_error(error) from error
-    history = database.get_session_history(session_id)
-    if history is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "session_not_found", "message": "会话不存在"},
-        )
-    history["can_send_message"] = database.get_active_run(session_id) is None
-    # 历史进度是只读快照：Run 当时结论 + Task/Operation 最新事实，
-    # 与消息历史分开呈现，不暴露内部状态名给前端。
-    progress = database.get_session_progress(session_id)
-    if progress is not None:
-        history["progress"] = progress
-    return history
+    return session_history(database, session_id)
 
 
-@app.get("/api/sessions/{session_id}/status")
-def get_session_status(session_id: str):
+@app.get("/api/sessions/{session_id}/resume")
+def resume_session(session_id: str, request: Request, last_event_id: str | None = Header(default=None)):
     database = get_database()
     try:
         session_id = database.normalize_session_id(session_id)
+        return resume_response(database, session_id, request, last_event_id)
     except StoreError as error:
         raise _http_error(error) from error
-    status = database.get_session_status(session_id)
-    if status is None:
-        raise HTTPException(status_code=404, detail={"code": "session_not_found", "message": "会话不存在"})
-    return status
 
 
 @app.post("/api/sessions/{session_id}/stop")
@@ -172,19 +159,24 @@ def chat(body: ChatRequest):
         raise _http_error(error) from error
 
     try:
-        user_message_id, run_id = database.create_run_turn(
-            session_id=session_id,
-            parent_message_id=body.parent_message_id,
-            content=body.message,
-            file_ids=body.ref_file_ids,
-            deadline_at=time.time() + MAX_RUN_SECONDS,
-        )
+        with buffers.condition:
+            user_message_id, run_id = database.create_run_turn(
+                session_id=session_id,
+                parent_message_id=body.parent_message_id,
+                content=body.message,
+                file_ids=body.ref_file_ids,
+                deadline_at=time.time() + MAX_RUN_SECONDS,
+            )
+            event_buffer = buffers.register(database, run_id, user_message_id)
+        watch_terminal(database, run_id, event_buffer)
         with _lock:
             _running_sessions.add(session_id)
         chain = database.get_message_chain(session_id, user_message_id)
     except Exception as error:
         if "run_id" in locals():
             database.finish_run(run_id, "failed", reason="context_setup_failed")
+            event_buffer.finish_producing()
+            buffers.terminal(database, run_id)
         with _lock:
             _running_sessions.discard(session_id)
         if isinstance(error, StoreError):
@@ -208,6 +200,8 @@ def chat(body: ChatRequest):
         )
     except Exception:
         database.finish_run(run_id, "failed", reason="context_setup_failed")
+        event_buffer.finish_producing()
+        buffers.terminal(database, run_id)
         with _lock:
             _running_sessions.discard(session_id)
         raise
@@ -229,12 +223,14 @@ def chat(body: ChatRequest):
                 release_session=release_session,
                 business_adapters=getattr(app.state, "business_adapters", None),
             ):
+                frame = event_buffer.append(frame)
                 if not disconnected.is_set():
                     frames.put(frame)
         except Exception:
             database.finish_run(run_id, "failed", reason="worker_crashed")
             release_session()
         finally:
+            event_buffer.finish_producing()
             if not disconnected.is_set():
                 frames.put(None)
 

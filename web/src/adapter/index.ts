@@ -31,6 +31,15 @@ export type SessionHistory = {
   };
   messages: SessionMessage[];
   can_send_message: boolean;
+  progress?: SessionProgress;
+};
+
+export type SessionProgress = {
+  runs: { user_message_id: number; status: string; reason: string | null; conclusion: string; created_at: number; finished_at: number | null }[];
+  tasks: { id: number; goal: string; version: number; status: string; status_label: string;
+    operations: { id: number; tool: string; status: string; conflict: boolean; confirmed_result: string | null; business_operation_id: string | null }[];
+    steps: { step_id: string; tool: string; approved: boolean; depends_on: string[] }[];
+  }[];
 };
 
 /** 会话级观测汇总（GET /api/sessions/{id}/stats 现场聚合）。 */
@@ -85,18 +94,24 @@ export async function getSessionHistory(
   return (await response.json()) as SessionHistory;
 }
 
-export type SessionStatus = { processing: boolean; can_send_message: boolean };
 export type StopResult = { result: "processing" | "ended" | "no_active_request" };
 
-export async function getSessionStatus(sessionId: string, signal?: AbortSignal): Promise<SessionStatus | null> {
-  const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/status`, { signal });
-  if (response.status === 404) {
+/** 首次恢复不携带游标；仅保留原展示时才可传 lastEventId。 */
+export async function streamResume(sessionId: string, signal?: AbortSignal, lastEventId?: string): Promise<AsyncGenerator<AgentEvent> | null> {
+  const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/resume`, {
+    signal,
+    headers: lastEventId ? { "Last-Event-ID": lastEventId } : undefined,
+  });
+  if (response.status === 204) {
     return null;
   }
   if (!response.ok) {
     throw await responseError(response);
   }
-  return await response.json() as SessionStatus;
+  if (!response.body) {
+    throw new Error("恢复响应没有数据流");
+  }
+  return readSse(response.body, "resume");
 }
 
 export async function stopSession(sessionId: string, signal?: AbortSignal): Promise<StopResult> {

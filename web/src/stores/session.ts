@@ -3,6 +3,27 @@ import { create } from "zustand";
 type PendingSession = { id: string; title: string };
 
 const ACTIVE_SESSION_KEY = "demo-agent.active-session";
+const PENDING_SESSION_KEY = "demo-agent.pending-session";
+
+function markPending(pending: boolean) {
+  try {
+    if (pending) {
+      window.sessionStorage.setItem(PENDING_SESSION_KEY, "1");
+    } else {
+      window.sessionStorage.removeItem(PENDING_SESSION_KEY);
+    }
+  } catch {
+    // 标签页存储不可用时仍可继续当前会话。
+  }
+}
+
+function restoredPending(): boolean {
+  try {
+    return window.sessionStorage.getItem(PENDING_SESSION_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 function rememberSession(id: string | null) {
   try {
@@ -32,6 +53,7 @@ type SessionState = {
   sessionGeneration: number;
   currentMessageId: number | null;
   isNewSession: boolean;
+  restorePending: boolean;
   setCurrentMessageId: (id: number | null) => void;
   beginSession: (message: string) => PendingSession | null;
   discardPendingSession: (pending: PendingSession) => void;
@@ -47,12 +69,19 @@ export const useSessionStore = create<SessionState>((set, get) => {
     pendingSession: null,
     sessionGeneration: 0,
     currentMessageId: null,
-    isNewSession: restored === null,
+    isNewSession: restored === null || restoredPending(),
+    restorePending: restored !== null && restoredPending(),
     setCurrentMessageId: (id) => {
       if (id !== null) {
         rememberSession(get().sessionId);
+        markPending(false);
+      }
+      if (id === null && get().restorePending) {
+        rememberSession(null);
+        markPending(false);
       }
       set((state) => ({
+        restorePending: false,
         currentMessageId: id,
         isNewSession: id === null ? state.isNewSession : false,
       }));
@@ -62,24 +91,33 @@ export const useSessionStore = create<SessionState>((set, get) => {
         return null;
       }
       const pending = { id: get().sessionId, title: message.trim().slice(0, 30) || "新对话" };
+      rememberSession(pending.id);
+      markPending(true);
       set({ pendingSession: pending });
       return pending;
     },
-    discardPendingSession: (pending) => set((state) => ({
-      pendingSession: state.pendingSession === pending ? null : state.pendingSession,
-    })),
+    discardPendingSession: (pending) => {
+      if (get().pendingSession === pending && get().isNewSession) {
+        rememberSession(null);
+        markPending(false);
+      }
+      set((state) => ({ pendingSession: state.pendingSession === pending ? null : state.pendingSession }));
+    },
     switchSession: (id) => {
       rememberSession(id);
+      markPending(false);
       set((state) => ({
         sessionId: id,
         pendingSession: null,
         sessionGeneration: state.sessionGeneration + 1,
         currentMessageId: null,
         isNewSession: false,
+        restorePending: false,
       }));
     },
     newSession: () => set((state) => {
       rememberSession(null);
+      markPending(false);
       const sessionId = crypto.randomUUID();
       return {
         sessionId,
@@ -87,6 +125,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
         sessionGeneration: state.sessionGeneration + 1,
         currentMessageId: null,
         isNewSession: true,
+        restorePending: false,
       };
     }),
   };

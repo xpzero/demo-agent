@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getSessionHistory } from "@/adapter";
+import { getSessionHistory, type SessionHistory } from "@/adapter";
 import type { ChatMessage } from "@/chat/message";
 import { historyToMessages } from "@/chat/messageHistory";
 import { useSessionStore } from "@/stores/session";
@@ -17,16 +17,18 @@ export function useSessionMessages(sessionId: string, sessionGeneration: number)
   const [state, setState] = useState<HistoryState>({ generation: -1, status: "loading", error: "" });
   const [retryCount, setRetryCount] = useState(0);
   const [canSend, setCanSend] = useState(false);
+  const [initialHistory, setInitialHistory] = useState<SessionHistory | null>(null);
   const setCurrentMessageId = useSessionStore((store) => store.setCurrentMessageId);
 
   useEffect(() => {
     const controller = new AbortController();
     setMessages([]);
+    setInitialHistory(null);
     setCanSend(false);
     setSummaryCursor(null);
     setState({ generation: sessionGeneration, status: "loading", error: "" });
 
-    if (useSessionStore.getState().isNewSession) {
+    if (useSessionStore.getState().isNewSession && !useSessionStore.getState().restorePending) {
       setCurrentMessageId(null);
       setCanSend(true);
       setState({ generation: sessionGeneration, status: "ready", error: "" });
@@ -36,8 +38,15 @@ export function useSessionMessages(sessionId: string, sessionGeneration: number)
           return;
         }
         if (!history) {
+          if (useSessionStore.getState().restorePending) {
+            setCurrentMessageId(null);
+            setCanSend(true);
+            setState({ generation: sessionGeneration, status: "ready", error: "" });
+            return;
+          }
           throw new Error("会话不存在");
         }
+        setInitialHistory(history);
         setCurrentMessageId(history.session.current_message_id);
         setSummaryCursor(history.session.summary_upto_message_id);
         setMessages(historyToMessages(history.messages));
@@ -68,6 +77,7 @@ export function useSessionMessages(sessionId: string, sessionGeneration: number)
     canSend: historyReady && canSend,
     setCanSend,
     historyReady,
+    initialHistory,
     loadingHistory: !current || state.status === "loading",
     historyError: current && state.status === "error" ? state.error : "",
     retryHistory: () => setRetryCount((count) => count + 1),
