@@ -49,6 +49,15 @@ class RunStoreMixin:
             ).fetchone()
             return dict(row) if row else None
 
+    def get_latest_run(self, session_id: str) -> dict | None:
+        session_id = normalize_session_id(session_id)
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM runs WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def get_session_status(self, session_id: str) -> dict | None:
         """A single lightweight read, without loading message history."""
         session_id = normalize_session_id(session_id)

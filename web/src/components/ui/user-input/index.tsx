@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
-import { Paperclip } from "lucide-react";
+import { Paperclip, Square } from "lucide-react";
 import { useUserInputStore } from "@/stores/user";
 import { useDocumentUpload } from "@/hooks/useDocumentUpload";
 import DocumentAttachment from "@/components/ui/document-attachment";
@@ -149,14 +149,22 @@ export default function UserInput({ onSend, running, historyReady, canSend, onSt
           </Tooltip>
         </div>
         <div className={styles.userInputHandleAreaRight}>
-          {historyReady && (running || !canSend) && (
-            <Button variant="outline" onClick={() => { void onStop(); }} disabled={stopping}>
-              {stopping ? "停止中…" : "停止"}
+          {/* 运行中发送按钮原地变为停止按钮：黑底白色实心方块，不新增独立按钮 */}
+          {running ? (
+            <Button
+              variant="default"
+              onClick={() => { void onStop(); }}
+              disabled={stopping}
+              aria-label={stopping ? "停止中" : "停止"}
+              className={stopping ? "opacity-50" : undefined}
+            >
+              <Square className="size-3.5 fill-current" />
+            </Button>
+          ) : (
+            <Button onClick={submit} disabled={!canSend || !historyReady || !text.trim()}>
+              发送
             </Button>
           )}
-          <Button onClick={submit} disabled={running || !canSend || !historyReady || !text.trim()}>
-            发送
-          </Button>
         </div>
       </div>
     </div>

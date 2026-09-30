@@ -33,7 +33,7 @@ export function applyChatEvent(
       }
     }
   }
-  const lastIndex = next.length - 1;
+  const lastIndex = next.findIndex((message) => message.id === ids.assistantId);
   const assistant = next[lastIndex];
   if (assistant?.kind === "assistant" && assistant.id === ids.assistantId) {
     next[lastIndex] = {

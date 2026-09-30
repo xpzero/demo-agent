@@ -71,6 +71,31 @@ export function reconcileTurnFromHistory(
   return next;
 }
 
+/** 保留完整流的事件顺序，只以历史同步持久化元数据；事实降级仍用历史展示。 */
+export function calibrateHistory(current: ChatMessage[], history: SessionMessage[], ids: { userId: string; assistantId: string } | null): ChatMessage[] {
+  const fallback = historyToMessages(history);
+  if (!ids) {
+    return fallback;
+  }
+  const user = current.find((message) => message.id === ids.userId);
+  const assistant = current.find((message) => message.id === ids.assistantId);
+  if (!user || user.kind !== "user" || !assistant || assistant.kind !== "assistant") {
+    return fallback;
+  }
+  const persisted = history.findLast((message) => message.role === "assistant" && message.parent_id === user.messageId);
+  if (!persisted) {
+    return fallback;
+  }
+  const text = assistant.events.filter((event) => event.type === "text_delta").map((event) => event.text).join("");
+  if (text !== persisted.content) {
+    return fallback;
+  }
+  return fallback.map((message) => message.messageId === persisted.id ? {
+    ...assistant, messageId: persisted.id, createdAt: persisted.created_at,
+    incomplete: persisted.status === "incomplete",
+  } : message);
+}
+
 export function syncMessageTimestamps(current: ChatMessage[], messages: SessionMessage[]): ChatMessage[] {
   const createdAtById = new Map(messages.map((message) => [message.id, message.created_at]));
   return current.map((message) => {

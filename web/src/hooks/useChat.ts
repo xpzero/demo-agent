@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { getSessionHistory, getSessionStatus, HttpError, stopSession, streamChat } from "@/adapter";
+import { getSessionHistory, HttpError, stopSession, streamChat, type SessionProgress } from "@/adapter";
 import { useSessionStore } from "@/stores/session";
-import { historyToMessages, reconcileTurnFromHistory, syncMessageTimestamps } from "@/chat/messageHistory";
-import { recoverSession, recoveryPollInterval } from "@/chat/sessionRecovery";
+import { calibrateHistory } from "@/chat/messageHistory";
+import { needsResume, recoverSession, resumeSnapshot } from "@/chat/sessionRecovery";
 import { appendPendingTurn, applyChatEvent, type TurnIds } from "@/chat/messageUpdates";
 import { useSessionMessages } from "./useSessionMessages";
+
+type Connection = { controller: AbortController; mode: "chat" | "resume"; generation: number };
 
 export function useChat(onConversationChanged: () => void) {
   const sessionId = useSessionStore((state) => state.sessionId);
@@ -13,154 +15,140 @@ export function useChat(onConversationChanged: () => void) {
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
-  const runningRef = useRef(false);
+  const [progress, setProgress] = useState<SessionProgress>();
+  const [resumeRequest, setResumeRequest] = useState(0);
+  const connection = useRef<Connection | null>(null);
+  const requestedGeneration = useRef<number | null>(null);
   const stoppingRef = useRef(false);
-  const streamController = useRef<AbortController | null>(null);
   const changedRef = useRef(onConversationChanged);
   changedRef.current = onConversationChanged;
   const setCurrentMessageId = useSessionStore((state) => state.setCurrentMessageId);
   const {
     messages, setMessages, summaryCursor, setSummaryCursor, canSend, setCanSend,
-    historyReady, loadingHistory, historyError, retryHistory,
+    historyReady, initialHistory, loadingHistory, historyError, retryHistory,
   } = useSessionMessages(sessionId, sessionGeneration);
 
+  const requestResume = () => {
+    requestedGeneration.current = sessionGeneration;
+    setCanSend(false);
+    setResumeRequest((value) => value + 1);
+  };
+
   useEffect(() => {
+    setRunning(false);
+    setStopping(false);
+    stoppingRef.current = false;
     setError("");
     setStatusMessage("");
-    return () => streamController.current?.abort();
+    setProgress(undefined);
+    return () => {
+      connection.current?.controller.abort();
+      connection.current = null;
+    };
   }, [sessionGeneration]);
 
-  // 断流或打开仍在处理的历史会话时，持续检查状态；网络失败不解除发送保护。
+  // 只由历史加载或显式恢复请求触发；恢复失败不会因为 loading/canSend 改变而循环请求。
   useEffect(() => {
-    if (!historyReady || canSend || running) {
+    if (!historyReady) {
       return;
     }
-    let disposed = false;
-    let finished = false;
-    let inFlight = false;
-    let requestController: AbortController | null = null;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const interval = recoveryPollInterval(import.meta.env.VITE_SESSION_STATUS_POLL_MS);
-    const available = () => document.visibilityState === "visible" && navigator.onLine;
-    const poll = async () => {
-      if (disposed || finished || inFlight || !available()) {
+    setProgress(initialHistory?.progress);
+    if (requestedGeneration.current !== sessionGeneration && (!initialHistory || !needsResume(initialHistory))) {
+      return;
+    }
+    if (connection.current) {
+      return;
+    }
+    const controller = new AbortController();
+    const owner: Connection = { controller, mode: "resume", generation: sessionGeneration };
+    connection.current = owner;
+    let ids: TurnIds | null = null;
+    const current = () => !controller.signal.aborted && connection.current === owner && useSessionStore.getState().sessionGeneration === sessionGeneration;
+    setRunning(true);
+    setCanSend(false);
+    setStatusMessage("正在恢复会话…");
+    void recoverSession(sessionId, controller.signal, (event) => {
+      if (!current()) {
         return;
       }
-      inFlight = true;
-      const controller = new AbortController();
-      requestController = controller;
-      try {
-        const result = await recoverSession(sessionId, controller.signal);
-        if (disposed || controller.signal.aborted || useSessionStore.getState().sessionGeneration !== sessionGeneration) {
-          return;
-        }
-        if (result.ready) {
-          if (result.history) {
-            setCurrentMessageId(result.history.session.current_message_id);
-            setSummaryCursor(result.history.session.summary_upto_message_id);
-            setMessages(historyToMessages(result.history.messages));
-          } else if (useSessionStore.getState().isNewSession) {
-            // 本页尚未建立会话（新会话首条发送在落库前失败），可重新发送。
-            const pending = useSessionStore.getState().pendingSession;
-            if (pending) {
-              useSessionStore.getState().discardPendingSession(pending);
-            }
-            setCurrentMessageId(null);
-          } else {
-            // 已存在会话却返回 404：不能据此解锁或清空既有会话，保持锁定并继续重试。
-            setStatusMessage("会话在服务端查询不存在，已保持发送锁定，将继续自动重试…");
-            return;
-          }
-          finished = true;
-          setCanSend(true);
-          setStatusMessage("");
-          changedRef.current();
-          return;
-        }
-        setStatusMessage("会话正在处理，等待完成后恢复消息…");
-      } catch (cause) {
-        if (disposed || controller.signal.aborted) {
-          return;
-        }
-        setStatusMessage(`恢复连接失败，将自动重试：${cause instanceof Error ? cause.message : String(cause)}`);
-      } finally {
-        inFlight = false;
-        requestController = null;
-        if (!disposed && !finished && available()) {
-          timer = setTimeout(() => { void poll(); }, interval);
+      if (event.type === "resume_snapshot") {
+        const recovered = resumeSnapshot(event);
+        ids = recovered.ids;
+        setMessages(recovered.messages);
+        setCurrentMessageId(event.history.session.current_message_id);
+        setSummaryCursor(event.history.session.summary_upto_message_id);
+        setProgress(event.history.progress);
+        setStatusMessage(event.history.can_send_message ? "正在同步消息…" : "会话正在处理…");
+      } else if (event.type !== "stream_end" && ids) {
+        const target = ids;
+        setMessages((prev) => applyChatEvent(prev, event, target, Date.now() / 1000));
+        if (event.type === "error") {
+          setError(event.message);
         }
       }
-    };
-    const availabilityChanged = () => {
-      clearTimeout(timer);
-      if (!available()) {
-        requestController?.abort();
+    }, (history) => {
+      if (!current()) {
         return;
       }
-      void poll();
-    };
-    document.addEventListener("visibilitychange", availabilityChanged);
-    window.addEventListener("online", availabilityChanged);
-    window.addEventListener("offline", availabilityChanged);
-    void poll();
+      if (history) {
+        const target = ids;
+        setMessages((prev) => calibrateHistory(prev, history.messages, target));
+        setCurrentMessageId(history.session.current_message_id);
+        setSummaryCursor(history.session.summary_upto_message_id);
+        setProgress(history.progress);
+        setCanSend(history.can_send_message);
+      } else {
+        setCurrentMessageId(null);
+        setCanSend(true);
+      }
+    }, useSessionStore.getState().isNewSession).then(() => {
+      if (current()) {
+        setStatusMessage("");
+        changedRef.current();
+      }
+    }).catch(() => {
+      if (current()) {
+        setCanSend(false);
+        setError("连接中断，请刷新重试");
+        setStatusMessage("");
+      }
+    }).finally(() => {
+      if (connection.current === owner) {
+        connection.current = null;
+        setRunning(false);
+      }
+    });
     return () => {
-      disposed = true;
-      requestController?.abort();
-      clearTimeout(timer);
-      document.removeEventListener("visibilitychange", availabilityChanged);
-      window.removeEventListener("online", availabilityChanged);
-      window.removeEventListener("offline", availabilityChanged);
+      controller.abort();
+      if (connection.current === owner) {
+        connection.current = null;
+      }
     };
-  }, [sessionId, sessionGeneration, historyReady, canSend, running, setCanSend, setMessages, setSummaryCursor, setCurrentMessageId]);
+  }, [sessionId, sessionGeneration, historyReady, initialHistory, resumeRequest, setCanSend, setMessages, setSummaryCursor, setCurrentMessageId]);
 
   const send = async (message: string, refFileIds: string[] = [], onAccepted: () => void = () => {}) => {
-    if (runningRef.current || stoppingRef.current || !canSend || useSessionStore.getState().sessionGeneration !== sessionGeneration) {
+    if (connection.current || stoppingRef.current || !canSend || useSessionStore.getState().sessionGeneration !== sessionGeneration) {
       return;
     }
-    runningRef.current = true;
+    const controller = new AbortController();
+    const owner: Connection = { controller, mode: "chat", generation: sessionGeneration };
+    connection.current = owner;
     setRunning(true);
     setCanSend(false);
     setError("");
     setStatusMessage("");
-    const pendingSession = useSessionStore.getState().beginSession(message);
-    const controller = new AbortController();
-    streamController.current = controller;
+    const pending = useSessionStore.getState().beginSession(message);
     const ids: TurnIds = { userId: crypto.randomUUID(), assistantId: crypto.randomUUID() };
-    let accepted = false;
-    let completed = false;
-    const current = () => !controller.signal.aborted && useSessionStore.getState().sessionGeneration === sessionGeneration;
-    const reconcile = async () => {
-      const history = await getSessionHistory(sessionId, controller.signal);
-      if (!current() || !history) {
-        return null;
-      }
-      setCurrentMessageId(history.session.current_message_id);
-      setSummaryCursor(history.session.summary_upto_message_id);
-      setMessages((prev) => syncMessageTimestamps(reconcileTurnFromHistory(prev, history.messages, ids), history.messages));
-      return history;
-    };
-    const refreshCanSend = async () => {
-      const status = await getSessionStatus(sessionId, controller.signal);
-      if (!current()) {
-        return;
-      }
-      setCanSend(status ? status.can_send_message : false);
-      if (status && !status.can_send_message) {
-        setStatusMessage("会话正在处理，等待完成后恢复消息…");
-      }
-    };
+    const current = () => !controller.signal.aborted && connection.current === owner && useSessionStore.getState().sessionGeneration === sessionGeneration;
+    let resume = false;
     try {
-      const events = await streamChat({
-        session_id: sessionId,
-        parent_message_id: useSessionStore.getState().currentMessageId,
-        message,
-        ref_file_ids: refFileIds,
-      }, controller.signal);
+      const events = await streamChat({ session_id: sessionId, parent_message_id: useSessionStore.getState().currentMessageId, message, ref_file_ids: refFileIds }, controller.signal);
       if (!current()) {
         return;
       }
-      accepted = true;
       onAccepted();
+      // 接受时已持久化会话，立即刷新列表；生成中切走后仍能从侧边栏切回。
+      changedRef.current();
       setMessages((prev) => appendPendingTurn(prev, message, ids, Date.now() / 1000));
       for await (const event of events) {
         if (!current()) {
@@ -174,43 +162,41 @@ export function useChat(onConversationChanged: () => void) {
           setCurrentMessageId(event.message_id);
         }
       }
-      completed = true;
-      // 终止事件后以服务端落库事实为准：正文、完成状态、工具存档与发送限制。
-      const history = await reconcile();
+      const history = await getSessionHistory(sessionId, controller.signal);
       if (current()) {
-        if (history) {
-          setCanSend(history.can_send_message);
+        if (!history) {
+          resume = true;
         } else {
-          await refreshCanSend();
+          setMessages((prev) => calibrateHistory(prev, history.messages, ids));
+          setCurrentMessageId(history.session.current_message_id);
+          setSummaryCursor(history.session.summary_upto_message_id);
+          setProgress(history.progress);
+          setCanSend(history.can_send_message);
+          resume = !history.can_send_message;
         }
       }
     } catch (cause) {
       if (current()) {
-        const message = cause instanceof Error ? cause.message : String(cause);
-        setError(message);
-        if (cause instanceof HttpError && cause.status === 409 && cause.code === "session_busy") {
-          // 会话正被其他请求占用：保留 session_busy 语义，刷新状态而不是解锁。
-          try {
-            await refreshCanSend();
-          } catch {
-            setCanSend(false);
+        if (cause instanceof HttpError && cause.status !== 409 && cause.status < 500) {
+          setError(cause.message);
+          if (pending) {
+            useSessionStore.getState().discardPendingSession(pending);
           }
+          setCanSend(true);
         } else {
-          if (accepted && !completed) {
-            setMessages((prev) => applyChatEvent(prev, { type: "error", message }, ids, Date.now() / 1000));
-          }
-          if (pendingSession && !accepted) {
-            useSessionStore.getState().discardPendingSession(pendingSession);
-          }
+          // 网络失败可能已被服务端接收；只读恢复，不重发用户消息。
+          resume = true;
         }
       }
     } finally {
-      if (streamController.current === controller) {
-        streamController.current = null;
-        runningRef.current = false;
+      if (connection.current === owner) {
+        connection.current = null;
         setRunning(false);
+        if (resume) {
+          requestResume();
+        }
+        changedRef.current();
       }
-      changedRef.current();
     }
   };
 
@@ -220,29 +206,30 @@ export function useChat(onConversationChanged: () => void) {
     }
     stoppingRef.current = true;
     setStopping(true);
-    setError("");
+    const stopController = new AbortController();
     try {
-      const result = await stopSession(sessionId);
-      if (useSessionStore.getState().sessionGeneration !== sessionGeneration) {
-        return;
+      const result = await stopSession(sessionId, stopController.signal);
+      if (useSessionStore.getState().sessionGeneration === sessionGeneration) {
+        setStatusMessage(result.result === "processing" ? "已请求停止，正在收尾…" : "正在同步停止结果…");
       }
-      setStatusMessage(result.result === "processing" ? "已请求停止，等待当前任务结束…" : "任务已结束，正在同步消息…");
-      // 停止请求已提交，关闭本地消费并由状态轮询等待服务端真正结束。
-      streamController.current?.abort();
-      setCanSend(false);
     } catch (cause) {
       if (useSessionStore.getState().sessionGeneration === sessionGeneration) {
-        setError(`停止失败：${cause instanceof Error ? cause.message : String(cause)}`);
+        setError(`停止请求未确认：${cause instanceof Error ? cause.message : String(cause)}`);
       }
     } finally {
-      stoppingRef.current = false;
-      setStopping(false);
+      if (useSessionStore.getState().sessionGeneration === sessionGeneration) {
+        stoppingRef.current = false;
+        setStopping(false);
+        if (connection.current?.mode !== "resume") {
+          connection.current?.controller.abort();
+          connection.current = null;
+          setRunning(false);
+          requestResume();
+        }
+      }
     }
   };
 
-  return {
-    running, stopping, stop, canSend, statusMessage, error, messages, summaryCursor,
-    send, historyReady, loadingHistory, historyError,
-    retryHistory: () => { setError(""); retryHistory(); },
-  };
+  return { running, stopping, stop, canSend, statusMessage, error, progress, messages, summaryCursor, send, historyReady, loadingHistory, historyError,
+    retryHistory: () => { setError(""); retryHistory(); } };
 }

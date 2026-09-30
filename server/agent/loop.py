@@ -441,7 +441,10 @@ def stream_events(
                         while time.monotonic() < until:
                             _check_stop(should_stop)
                             _check_deadline(deadline)
-                            time.sleep(min(0.05, until - time.monotonic()))
+                            remaining = until - time.monotonic()
+                            if remaining <= 0:
+                                break
+                            time.sleep(min(0.05, remaining))
                     continue
                 finally:
                     if stream is not None and hasattr(stream, "close"):

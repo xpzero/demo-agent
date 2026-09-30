@@ -36,7 +36,7 @@ test("失败请求只移除自己的临时条目，不影响重试或新会话",
   assert.equal(useSessionStore.getState().pendingSession, next);
 });
 
-test("刷新保留已建立会话，未提交草稿不占用持久会话标识", async () => {
+test("刷新区分已建立会话与待确认请求，输入草稿不占用会话标识", async () => {
   const values = new Map();
   const before = globalThis.window;
   globalThis.window = { sessionStorage: {
@@ -47,8 +47,13 @@ test("刷新保留已建立会话，未提交草稿不占用持久会话标识",
   try {
     useSessionStore.getState().newSession();
     const id = useSessionStore.getState().sessionId;
-    useSessionStore.getState().beginSession("draft");
     assert.equal(values.size, 0);
+    useSessionStore.getState().beginSession("draft");
+    assert.equal(values.get("demo-agent.active-session"), id);
+    assert.equal(values.get("demo-agent.pending-session"), "1");
+    const { useSessionStore: pendingRefresh } = await import(`../src/stores/session.ts?pending=${Date.now()}`);
+    assert.equal(pendingRefresh.getState().restorePending, true);
+    assert.equal(pendingRefresh.getState().isNewSession, true);
     useSessionStore.getState().setCurrentMessageId(12);
     assert.equal(values.get("demo-agent.active-session"), id);
     const { useSessionStore: refreshed } = await import(`../src/stores/session.ts?reload=${Date.now()}`);

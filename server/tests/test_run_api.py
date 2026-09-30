@@ -56,9 +56,8 @@ class RunApiTests(unittest.TestCase):
             worker.start()
             try:
                 self.assertTrue(entered.wait(5))
-                with patch.object(Database, "get_session_history", side_effect=AssertionError("status loaded history")):
-                    status = self.client.get(f"/api/sessions/{self.session_id}/status").json()
-                self.assertEqual(status, {"processing": True, "can_send_message": False})
+                history = self.client.get(f"/api/sessions/{self.session_id}").json()
+                self.assertFalse(history["can_send_message"])
                 busy = self.client.post("/api/chat", json=self.payload())
                 self.assertEqual(busy.status_code, 409)
                 self.assertEqual(busy.json()["detail"]["code"], "session_busy")
@@ -73,8 +72,7 @@ class RunApiTests(unittest.TestCase):
                 worker.join(8)
         self.assertFalse(worker.is_alive())
         self.assertEqual(result[0].status_code, 200)
-        self.assertEqual(self.client.get(f"/api/sessions/{self.session_id}/status").json(),
-                         {"processing": False, "can_send_message": True})
+        self.assertTrue(self.client.get(f"/api/sessions/{self.session_id}").json()["can_send_message"])
 
     def test_worker_completes_without_consuming_sse(self):
         import time
@@ -117,11 +115,11 @@ class RunApiTests(unittest.TestCase):
         task = self.database.create_task(run, "提交", "running")
         self.database.create_operation(task, "提交", "running", run_id=run)
         with TestClient(api.app) as client:
-            self.assertEqual(client.get(f"/api/sessions/{self.session_id}/status").json()["processing"], True)
+            self.assertFalse(client.get(f"/api/sessions/{self.session_id}").json()["can_send_message"])
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline and self.database.get_active_run(self.session_id):
                 time.sleep(0.01)
-            self.assertFalse(client.get(f"/api/sessions/{self.session_id}/status").json()["processing"])
+            self.assertTrue(client.get(f"/api/sessions/{self.session_id}").json()["can_send_message"])
         state = self.database.get_run(run)
         assert state is not None
         self.assertEqual(state["status"], "timed_out")
