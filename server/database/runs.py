@@ -503,8 +503,9 @@ class RunStoreMixin:
                 if links[0]["status"] not in ("pending", "running", "active") or goal_version != version:
                     raise StoreError("task_changed", "任务目标或状态已变化，需重新判断", 409)
             if connection.execute(
-                "SELECT 1 FROM operations WHERE task_id = ? AND status IN ('unknown', 'running')",
-                (task_id,),
+                """SELECT 1 FROM operations WHERE task_id = ?
+                   AND (status = 'unknown' OR (status = 'running' AND run_id != ?))""",
+                (task_id, run_id),
             ).fetchone():
                 raise StoreError("operation_needs_reconciliation", "先核实未确定的操作结果", 409)
             operation_id = connection.execute(

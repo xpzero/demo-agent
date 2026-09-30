@@ -1,6 +1,7 @@
 import json
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
@@ -261,6 +262,14 @@ def _build_assistant_message(text: str, tool_calls: list[dict]) -> dict:
     }
 
 
+# P2-5：只读工具并发执行；副作用工具（write_file/calculate）串行殿后。
+# 新增只读工具时在此登记；不在名单内的工具一律按副作用处理（保守默认）。
+READONLY_TOOL_NAMES = frozenset(
+    {"read_file", "web_search", "fetch_url", "get_weather", "parse_attached_document"}
+)
+TOOL_CONCURRENCY = 4
+
+
 def _run_tool_calls(
     tool_calls_with_args: list[tuple[dict, dict]],
     items: list,
@@ -271,55 +280,106 @@ def _run_tool_calls(
     on_tool_attempt: Callable[[str, str, dict], Callable[[str, bool], None]] | None = None,
     on_recovery_suggestion: Callable[[dict], str] | None = None,
 ) -> Iterator[dict]:
-    """按模型给出的顺序逐个执行：结果写回 items，tool_call_id 原样复用。
+    """同轮工具分两段执行，事件按模型调用顺序同序产出。
 
-    current_turn 存在时（P0-2 埋点），每个工具的名/参数副本/结果副本/
-    耗时/成败记入该次模型请求的观测记录；为 None 时零开销。
+    只读工具（READONLY_TOOL_NAMES）的执行体丢进线程池并发跑；
+    副作用工具等并发段全部完成后在主线程串行执行，顺序与模型
+    调用顺序一致。恢复账本（on_tool_attempt）与 ToolRecord 埋点
+    始终在主线程按调用顺序登记，不引入并发写。current_turn 存在
+    时（P0-2 埋点），每个工具的名/参数副本/结果副本/耗时/成败
+    记入该次模型请求的观测记录；为 None 时零开销。
     """
+    _check_deadline(deadline)
+    _check_stop(should_stop)
+    # 第 1 步：按调用顺序亮牌
     for tool_call, args in tool_calls_with_args:
-        _check_deadline(deadline)
-        _check_stop(should_stop)
         yield {
             "type": "tool_call",
             "id": tool_call["id"],
             "name": tool_call["name"],
             "args": args,
         }
-        _check_stop(should_stop)
-        recovery = tool_call["name"] == "recovery_suggestion" and on_recovery_suggestion is not None
-        finish_attempt = (on_tool_attempt(tool_call["id"], tool_call["name"], args)
-                          if on_tool_attempt is not None and not recovery else None)
+
+    def _execute(tool_call: dict, args: dict):
+        recovery = (tool_call["name"] == "recovery_suggestion"
+                    and on_recovery_suggestion is not None)
         tool_started = time.monotonic()
-        try:
-            if recovery:
-                tool_output, tool_ok = on_recovery_suggestion(args), True
-            else:
-                tool_output, tool_ok = execute_tool(tool_call["name"], args, context)
-        except BaseException as error:
-            if finish_attempt is not None:
-                finish_attempt(f"{type(error).__name__}: {error}", False)
-            raise
-        if finish_attempt is not None:
-            finish_attempt(tool_output, tool_ok)
-        items.append(
-            {"role": "tool", "tool_call_id": tool_call["id"], "content": tool_output}
-        )
+        if recovery:
+            output, ok = on_recovery_suggestion(args), True
+        else:
+            output, ok = execute_tool(tool_call["name"], args, context)
+        # 耗时在执行线程内计算真实执行时长；批内等待不计入
+        return output, ok, (time.monotonic() - tool_started) * 1000
+
+    def _attempt(tool_call: dict, args: dict):
+        recovery = tool_call["name"] == "recovery_suggestion" and on_recovery_suggestion is not None
+        if on_tool_attempt is None or recovery:
+            return None
+        return on_tool_attempt(tool_call["id"], tool_call["name"], args)
+
+    # 第 2 步：主线程按调用序登记并发段的账（快，无耗时 I/O）
+    readonly_indexes = [
+        i for i, (call, _) in enumerate(tool_calls_with_args)
+        if call["name"] in READONLY_TOOL_NAMES
+    ]
+    finishers = {}
+    for i in readonly_indexes:
+        tool_call, args = tool_calls_with_args[i]
+        finishers[i] = _attempt(tool_call, args)
+
+    # 第 3 步：只读工具执行体并发；耗时只发生在这里
+    results: dict[int, tuple[str, bool, float]] = {}
+    if readonly_indexes:
+        with ThreadPoolExecutor(max_workers=TOOL_CONCURRENCY) as pool:
+            futures = {
+                i: pool.submit(_execute, tool_calls_with_args[i][0], tool_calls_with_args[i][1])
+                for i in readonly_indexes
+            }
+            for i, future in futures.items():
+                try:
+                    results[i] = future.result()
+                except BaseException as error:
+                    finishers[i](f"{type(error).__name__}: {error}", False)
+                    raise
         _check_deadline(deadline)
-        tool_elapsed_ms = (time.monotonic() - tool_started) * 1000
+        _check_stop(should_stop)
+
+    # 第 4 步：副作用/recovery 工具主线程串行殿后（登记贴着执行）
+    for i, (tool_call, args) in enumerate(tool_calls_with_args):
+        if i in readonly_indexes:
+            continue
+        _check_deadline(deadline)
+        _check_stop(should_stop)
+        finishers[i] = _attempt(tool_call, args)
+        try:
+            results[i] = _execute(tool_call, args)
+        except BaseException as error:
+            finishers[i](f"{type(error).__name__}: {error}", False)
+            raise
+
+    # 第 5 步：按原调用顺序交卷——销账、埋点、回填、发事件
+    for i, (tool_call, args) in enumerate(tool_calls_with_args):
+        output, ok, tool_elapsed_ms = results[i]
+        finisher = finishers.get(i)
+        if finisher is not None:
+            finisher(output, ok)
+        items.append(
+            {"role": "tool", "tool_call_id": tool_call["id"], "content": output}
+        )
         if current_turn is not None:
             current_turn.tools.append(
                 ToolRecord(
                     name=tool_call["name"],
                     args_excerpt=excerpt(args),
-                    result_excerpt=excerpt(tool_output),
+                    result_excerpt=excerpt(output),
                     duration_ms=tool_elapsed_ms,
-                    ok=tool_ok,
+                    ok=ok,
                 )
             )
         yield {
             "type": "tool_result",
             "id": tool_call["id"],
-            "content": tool_output,
+            "content": output,
             "elapsed": tool_elapsed_ms,
         }
 

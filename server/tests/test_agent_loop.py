@@ -182,6 +182,8 @@ class StreamEventsTests(unittest.TestCase):
             {"role": "tool", "tool_call_id": "call_multiply", "content": "6"},
         ]
 
+        # P2-5：副作用工具（calculate）串行殿后，事件按调用顺序同序产出——
+        # 先全部亮牌（tool_call x2），再按序交卷（tool_result x2）。
         self.assertEqual(
             events,
             [
@@ -192,13 +194,13 @@ class StreamEventsTests(unittest.TestCase):
                     "name": "calculate",
                     "args": {"expression": "1+2"},
                 },
-                {"type": "tool_result", "id": "call_add", "content": "3", "elapsed": ANY},
                 {
                     "type": "tool_call",
                     "id": "call_multiply",
                     "name": "calculate",
                     "args": {"expression": "2*3"},
                 },
+                {"type": "tool_result", "id": "call_add", "content": "3", "elapsed": ANY},
                 {"type": "tool_result", "id": "call_multiply", "content": "6", "elapsed": ANY},
                 {"type": "text_delta", "text": "答案是 3 和 6"},
                 {"type": "done", "content": "答案是 3 和 6"},
@@ -231,8 +233,9 @@ class StreamEventsTests(unittest.TestCase):
         # 供前端工具卡片显示耗时
         items = [{"role": "user", "content": "hello"}]
         stream = [[tool_delta(0, call_id="call_1", name="get_weather", arguments='{"city":"北京"}')]]
-        # deadline、轮前、模型起点、流中、工具前、工具起点、工具后、耗时终点、下一轮。
-        with patch.object(loop.time, "monotonic", side_effect=[0, 1, 2, 3, 4, 5, 5.05, 5.098, 7]):
+        # deadline、轮前检查、模型计时起点、流中检查、批前检查、
+        # 工具计时起点、耗时终点（执行线程内）、批后检查、下一轮。
+        with patch.object(loop.time, "monotonic", side_effect=[0, 1, 2, 3, 4, 5, 5.098, 5.05, 7]):
             events, _, execute = self.run_with_streams(items, stream, tool_results=["晴"])
         results = [event for event in events if event["type"] == "tool_result"]
         self.assertEqual(len(results), 1)
@@ -276,8 +279,8 @@ class StreamEventsTests(unittest.TestCase):
         items = [{"role": "user", "content": "hello"}]
         stream = [[tool_delta(0, call_id="call_1", name="get_weather", arguments='{"city":"北京"}')]]
         # 序列: deadline=0, 轮前检查=1, 计时起点=2, 流中检查=3,
-        # 工具前检查=4, 工具计时起点=5, 工具后检查=301 → 超时
-        with patch.object(loop.time, "monotonic", side_effect=[0, 1, 2, 3, 4, 5, 301]):
+        # 批前检查=4, 工具计时起点=5, 耗时终点(线程内)=5.01, 批后检查=301 → 超时
+        with patch.object(loop.time, "monotonic", side_effect=[0, 1, 2, 3, 4, 5, 5.01, 301]):
             events, requests, execute = self.run_with_streams(items, stream, tool_results=["晴"])
         self.assertEqual([event["type"] for event in events], ["tool_call", "error"])
         self.assertIn("TimeoutError", events[-1]["message"])

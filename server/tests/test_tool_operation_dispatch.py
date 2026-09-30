@@ -2,6 +2,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,11 +16,12 @@ from api.chat_stream import chat_sse_stream
 from database import Database, StoreError
 
 
-def chunk(*, content=None, call_id=None):
+def chunk(*, content=None, call_id=None, name="write_file",
+          arguments='{"path":"note.txt","content":"hello"}'):
     delta = SimpleNamespace(content=content, tool_calls=None)
     if call_id is not None:
         delta.tool_calls = [SimpleNamespace(index=0, id=call_id, function=SimpleNamespace(
-            name="write_file", arguments='{"path":"note.txt","content":"hello"}'
+            name=name, arguments=arguments
         ))]
     return SimpleNamespace(choices=[SimpleNamespace(delta=delta)], usage=None)
 
@@ -136,6 +138,51 @@ class DispatchTests(unittest.TestCase):
         op = self.db.begin_tool_operation(next_run, "fresh-call", "write_file", {},
                                           task_id=task["id"], goal_version=task["goal_version"])
         self.assertTrue(op[0] > 0)
+
+    def test_parallel_readonly_registration_same_run_does_not_self_lock(self):
+        # P2-5：同 run 只读工具批量登记时，先登记的 operation 仍处于
+        # running，后登记的不能被「先核实未确定的操作结果」守卫自锁——
+        # 这批操作归当前 loop 拥有，不是恢复场景。工具执行体内部模拟
+        # 并发段第二个工具的登记（此刻 call1 的账仍挂 running）。
+        registered = []
+
+        def execute(name, args, context):
+            task = self.db.list_tasks(self.run_id)[0]
+            op = self.db.begin_tool_operation(self.run_id, "call2", name, args,
+                                              task_id=task["id"], goal_version=task["goal_version"])
+            registered.append(op[0])
+            self.db.finish_tool_operation(op[0], "second-result", True)
+            return "first-result", True
+
+        events = self.stream(
+            [[chunk(call_id="call1", name="get_weather", arguments='{"city":"北京"}')],
+             [chunk(content="完成")]], execute)
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual(len(registered), 1)
+        task = self.db.list_tasks(self.run_id)[0]
+        operations = self.db.list_operations(task["id"])
+        # call1（loop 登记）与 call2（工具体内登记）都成功销账
+        self.assertEqual({op["tool_call_id"] for op in operations}, {"call1", "call2"})
+        self.assertEqual({op["status"] for op in operations}, {"succeeded"})
+
+    def test_cross_run_running_operation_still_blocks_new_registration(self):
+        # 守卫只放宽同 run 的 running：别的 run 留下的 running/unknown
+        # 照旧拦截，恢复语义不放宽。
+        task = self.db.create_task(self.run_id, "stuck task", "running")
+        self.db.begin_tool_operation(self.run_id, "call-stuck", "write_file",
+                                     {"path": "a", "content": "b"},
+                                     task_id=task, goal_version=1)
+        # 模拟中断后收尾：期限已过，挂账 run 由 timed_out 关账放行会话
+        with self.db.transaction() as connection:
+            connection.execute("UPDATE runs SET deadline_at = ? WHERE id = ?",
+                               (time.time() - 1, self.run_id))
+        self.db.finish_run(self.run_id, "timed_out", "deadline")
+        user, next_run = self.db.create_run_turn(self.session, self.user, "resume", [])
+        self.db.attach_task(next_run, task)
+        with self.assertRaises(StoreError) as blocked:
+            self.db.begin_tool_operation(next_run, "call-new", "write_file", {},
+                                         task_id=task, goal_version=1)
+        self.assertEqual(blocked.exception.code, "operation_needs_reconciliation")
 
 
 if __name__ == "__main__":

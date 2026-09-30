@@ -154,10 +154,16 @@ class RetryTests(unittest.TestCase):
                 events.append(event)
                 if event["type"] == "tool_result":
                     stopped = True
-        self.assertEqual([event["type"] for event in events], ["tool_call", "tool_result", "stopped"])
-        execute.assert_called_once()
-        self.assertEqual([call["id"] for call in items[1]["tool_calls"]], ["a"])
+        # P2-5：同批工具整批执行完才交卷，停止在批边界生效；
+        # 不变量是每个调用都有配对结果（无半截历史），而非批内中断。
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["tool_call", "tool_call", "tool_result", "tool_result", "stopped"],
+        )
+        self.assertEqual(execute.call_count, 2)
+        self.assertEqual([call["id"] for call in items[1]["tool_calls"]], ["a", "b"])
         self.assertEqual(items[2], {"role": "tool", "tool_call_id": "a", "content": "2"})
+        self.assertEqual(items[3], {"role": "tool", "tool_call_id": "b", "content": "2"})
 
     def test_stop_during_stream(self):
         stopped = False

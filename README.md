@@ -126,7 +126,7 @@ demo-agent/
 │   ├── agent/               # 模型交互
 │   │   ├── client.py        # 智谱（OpenAI 兼容）客户端、MODEL、SYSTEM_PROMPT
 │   │   ├── context_budget.py # 上下文预算：截断策略，构造 items 时的长度控制
-│   │   ├── loop.py          # Chat Completions 流式 agent loop，产出项目内事件
+│   │   ├── loop.py          # Chat Completions 流式 agent loop，产出项目内事件；同轮只读工具线程池并发、副作用工具串行殿后
 │   │   └── metrics.py       # 运行埋点：TurnRecorder 内存账本（loop 记账不碰库）
 │   ├── tools/               # 工具集合，一个工具一个文件，按领域分子包
 │   │   ├── calculate.py
@@ -222,7 +222,7 @@ uv run python -m unittest tests.test_demo_business_adapter -v
 - `write_file` 无确认直接覆盖文件，没有备份或事务，也还没有“读取外部内容后禁止写入”等隔离
 - 上下文使用 `len(text)` 估算预算；滚动摘要可能逐次蒸馏损失早期细节。摘要失败期间只对游标后的原话做截断，未收编的中间段暂时不可见；原始消息仍在 SQLite。单条待收编原文超过单次收编预算时，本轮跳过摘要且游标不动；需调高 `SUMMARY_ABSORB_BUDGET` 才能收编该条。
 - 本分支新增模型 API 有限重试与可选兼容备用模型，以及 SQLite 版本迁移后的 Run/Task/Operation 事实表；同一 Session 的活跃 Run 由数据库占位。前端可按 Session 连接恢复流和请求停止。故障重启时保留原 Run、预算和未知 Operation，禁止盲目重发；启动时为遗留 Run 安排截止时间核对，预算耗尽才记录超时并释放会话。业务适配层尚未注册具体业务工具；`server/recovery/adapter.py` 定义了批准、单次提交、原操作查询、取消和可靠观察的接口。接入方必须提供适配器后，恢复 Run 才能执行批准步骤或核实未知操作。可观测性埋点已上线（`agent/metrics.py` + `agent_turns`/`tool_runs` 表 + `chat_messages.meta`）：每轮记录模型请求耗时、流式 usage（智谱接口已验证支持 `include_usage`）与工具执行名/耗时/成败，落库失败只记日志不影响回复；stats 查询接口已上线（GET /api/sessions/{id}/stats 现场聚合），前端已展示会话 stats 和工具执行耗时
-- 300 秒整轮时限只在模型 chunk 边界与工具执行前后检查；已进入阻塞的工具调用无法被强行抢占，超时要等调用返回后才生效
+- 300 秒整轮时限只在模型 chunk 边界与工具批边界检查；同轮多个只读工具并发执行，已启动的工具调用无法被强行抢占，超时要等整批返回后才生效。停止与超时在批边界和副作用工具之间生效。
 - HTTP 聊天用 SQLite 活跃 Run 占位拒绝同 Session 并发，后台线程独立于 SSE 连接；单进程执行者模型仍不支持多 worker 并发接手
 
 ## 后续计划

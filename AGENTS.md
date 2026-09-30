@@ -70,7 +70,7 @@ Makefile 没有 `test`、`lint`、`build` 或 `check` 目标。不要为了运�
 - 流中只把 `delta.content` 映射为文本增量；`delta.reasoning_content`（GLM 深度思考）不属于用户可见文本，跳过不展示、不持久化。
 - 流式工具参数必须按 `index` 把 `delta.tool_calls` 的增量聚齐后再解析。非法 JSON 属于编排错误，应成为 `error` 事件，且不能把 assistant tool_calls 消息留在历史里（只有调用、没有结果的半截历史）。
 - 一条 assistant 消息携带本轮全部工具调用，整体追加到上下文；不能只保留文本或部分调用。
-- 同一响应可以包含多个并行 tool calls。当前实现按响应顺序逐个执行并提交结果，副作用的实际发生顺序等于模型调用顺序。
+- 同一响应可以包含多个并行 tool calls。只读工具（`read_file`/`web_search`/`fetch_url`/`get_weather`/`parse_attached_document`，见 `agent/loop.py::READONLY_TOOL_NAMES`）的执行体在线程池并发执行（上限 `TOOL_CONCURRENCY`）；副作用工具（`write_file`/`calculate`）与 `recovery_suggestion` 等并发段全部完成后在主线程串行执行，相对顺序等于模型调用顺序。不在只读名单内的工具一律按副作用处理（保守默认）。`tool_call` 事件按调用顺序先行发出，`tool_result` 事件在整批完成后按同一顺序发出；每个工具的 `elapsed` 是其自身真实执行耗时，不含批内等待。停止与超时在批边界和副作用工具之间生效，不中断已启动的只读工具。
 - 每个工具结果使用 `role="tool"` 消息，并原样复用对应调用的 `tool_call_id`。不得漏掉或重复回填。
 - 工具处理器自身的异常由 `execute_tool` 转成 `(output, ok)` 二元组结果（异常或未知工具时 `ok=False`），让模型可以修正重试；请求错误、流错误、参数 JSON 错误等编排异常由 `stream_events` 转成 `error` 事件。不要混淆两条失败路径。
 - `max_turns` 限制一次用户任务内的模型请求次数。达到上限产出 `max_turns`，不能让工具循环无限运行。
