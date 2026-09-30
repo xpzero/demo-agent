@@ -21,12 +21,12 @@ export default function App() {
   const { sessions, loading, error: sessionsError, refresh } = useSessions();
   const { stats, refreshStats } = useSessionStats();
   const {
-    running, error, messages, summaryCursor, send, historyReady, loadingHistory, historyError, retryHistory,
+    running, stopping, stop, canSend, statusMessage, error, progress, messages, summaryCursor, send, historyReady, loadingHistory, historyError, retryHistory,
   } = useChat(() => {
     void refresh();
     refreshStats();
   });
-  const busy = running || loadingHistory;
+  const busy = loadingHistory;
 
   const selectSession = (id: string) => {
     if (busy) {
@@ -77,13 +77,34 @@ export default function App() {
                 <Button variant="ghost" size="sm" onClick={retryHistory}>重试</Button>
               </div>
             )}
+            {progress && (progress.tasks.length > 0 || progress.runs.at(-1)?.status !== "completed") && progress.runs.length > 0 && (
+              <details className="w-full max-w-3xl shrink-0 px-4 text-sm text-muted-foreground">
+                <summary>执行进度：{progress.runs.at(-1)?.conclusion}</summary>
+                <div className="max-h-40 overflow-auto py-2">
+                  {progress.tasks.map((task) => (
+                    <div key={task.id} className="mb-2">
+                      <p>{task.goal}：{task.status_label}</p>
+                      {task.operations.map((operation) => (
+                        <p key={operation.id}>
+                          {operation.tool}：{operation.conflict ? "结果有冲突，待核实" : operation.confirmed_result ?? ({ not_started: "尚未开始", maybe_submitted: "可能已提交", processing: "处理中", unconfirmed: "结果待核实", succeeded: "已确认成功", failed: "已确认失败", cancelled: "已确认取消" }[operation.status] ?? "结果待核实")}
+                        </p>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
             {error && <p className="text-sm text-red-500">{error}</p>}
+            {statusMessage && <p role="status" className="text-sm text-muted-foreground">{statusMessage}</p>}
 
             <div className="flex w-full shrink-0 justify-center">
               <UserInput
                 key={sessionGeneration}
                 onSend={send}
-                running={running || !historyReady}
+                running={running}
+                canSend={canSend}
+                onStop={stop}
+                stopping={stopping}
                 historyReady={historyReady}
               />
             </div>

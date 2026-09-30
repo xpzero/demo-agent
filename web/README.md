@@ -1,3 +1,24 @@
 # web
 
-前端界面（重写中）：Vite + React，通过 SSE 消费 `server/` 暴露的事件流；接口封装见 `src/adapter/`（types/transport/index），不含任何 UI 框架。
+前端使用 Vite + React，通过 `fetch` + `ReadableStream` 消费 `POST /api/chat` 与 `GET /api/sessions/{id}/resume` SSE。HTTP 和事件封装位于 `src/adapter/`，消息模型位于 `src/chat/`，请求及界面状态位于 `src/hooks/`。
+
+## 会话状态与停止
+
+- 历史接口的 `can_send_message` 决定是否允许发送。进入会话时，历史仍在处理、末条为用户消息或助手消息未完成，自动连接 `/resume`。
+- 恢复先应用 `resume_snapshot`。完整回放只清空目标用户消息之后的助手展示，随后复用聊天事件处理器，保留文字与工具事件的到达顺序；没有完整缓存时显示持久化事实。
+- 原始聊天流中断，或流结束但历史仍不允许发送时，进入恢复。恢复流的 `done`、`error` 不作为执行终态；收到 `stream_end` 后再次读取历史，确认消息、摘要游标、父消息 ID 和发送权限。
+- 原聊天 POST 意外断开后尝试一次 resume。恢复连接失败时提示刷新重试，保持发送保护；不自动反复重连、不重新提交聊天 POST。同一页面最多一个恢复订阅。
+- 点击「停止」调用 `POST /api/sessions/{id}/stop`。停止请求被接受后，继续通过恢复流与历史确认真正结束；停止失败显示错误并允许重试。
+- 草稿和附件在聊天 POST 被接受后清空；409 或其他 HTTP 请求失败保留原输入。首条请求发出时保存临时 Session 标记，收到持久化用户消息 ID 后转为已建立会话，支持首个事件到达之前刷新。
+- 会话切换或卸载时取消旧流并递增 sessionGeneration，旧结果不能修改新会话。运行中的会话也可以切走，再进入时连接恢复流。
+- 展示业务结论、任务与操作的最终事实，不展示内部 Run ID。缓存已丢失时，历史工具卡片与正文不保证原始交错顺序。
+
+## 检查
+
+从本目录执行：
+
+```sh
+pnpm lint
+pnpm build
+pnpm test
+```

@@ -46,7 +46,7 @@ class ChatApiTests(unittest.TestCase):
         }
 
     def events(self, response):
-        return [json.loads(frame.removeprefix("data: ")) for frame in response.text.strip().split("\n\n")]
+        return [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
 
     def test_first_chat_creates_session_and_persists_assistant(self):
         with patch.object(chat_stream, "stream_events", return_value=iter([
@@ -97,8 +97,8 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(runs[0]["args_excerpt"], "{'city': '北京'}")
         self.assertEqual(runs[0]["result_excerpt"], "晴")
         self.assertEqual(runs[0]["duration_ms"], 98.0)
-        self.assertEqual(history["messages"][1]["content"], "今天晴")
-        self.assertEqual(self.database.get_message_chain(self.session_id, history["messages"][1]["id"])[-1]["content"], "今天晴")
+        self.assertEqual(history["messages"][1]["content"], "先查今天晴")
+        self.assertEqual(self.database.get_message_chain(self.session_id, history["messages"][1]["id"])[-1]["content"], "先查今天晴")
 
     def test_tool_runs_follow_their_user_turn_even_without_assistant_text(self):
         from agent.metrics import ToolRecord
@@ -191,14 +191,18 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(seen[-1]["content"], "second")
 
     def test_concurrent_and_validation_failures_do_not_write(self):
-        api._running_sessions.add(self.session_id)
-        self.assertEqual(self.client.post("/api/chat", json=self.payload()).status_code, 409)
-        api._running_sessions.clear()
+        busy_session = str(uuid4())
+        _, busy_run = self.database.create_run_turn(busy_session, None, "running", [])
+        busy = self.client.post("/api/chat", json=self.payload(session_id=busy_session))
+        self.assertEqual(busy.status_code, 409)
+        self.assertEqual(busy.json()["detail"]["code"], "session_busy")
+        self.assertEqual(len(self.database.get_session_history(busy_session)["messages"]), 1)
+        self.database.finish_run(busy_run, "stopped")
         response = self.client.post("/api/chat", json=self.payload(parent_message_id=123))
         self.assertEqual(response.status_code, 404)
         response = self.client.post("/api/chat", json=self.payload(ref_file_ids=["file_missing"]))
         self.assertEqual(response.status_code, 404)
-        self.assertEqual(self.client.get("/api/sessions").json()["sessions"], [])
+        self.assertIsNone(self.database.get_session_history(self.session_id))
         self.assertEqual(api._running_sessions, set())
 
     def test_failed_stream_keeps_user_message_as_parent(self):
@@ -250,7 +254,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(api._running_sessions, set())
 
     def test_assistant_persistence_failure_emits_error_not_done(self):
-        with patch.object(Database, "add_assistant_message", side_effect=RuntimeError("write failed")):
+        with patch.object(Database, "upsert_partial_assistant", side_effect=RuntimeError("write failed")):
             with patch.object(chat_stream, "stream_events", return_value=iter([
                 {"type": "done", "content": "answer"},
             ])):
@@ -258,6 +262,23 @@ class ChatApiTests(unittest.TestCase):
         events = self.events(response)
         self.assertEqual([event["type"] for event in events], ["user_message", "error"])
         self.assertEqual(len(self.client.get(f"/api/sessions/{self.session_id}").json()["messages"]), 1)
+        self.assertEqual(api._running_sessions, set())
+
+    def test_recovery_format_error_maps_to_retryable_user_message(self):
+        # RecoveryFormatError 走面向用户的重试提示，不泄漏异常文本；
+        # 普通 ValueError 保持原始异常形态。
+        from agent.loop import RecoveryFormatError
+
+        def broken(_items, **_kwargs):
+            raise RecoveryFormatError("恢复判断需要唯一的 recovery_suggestion")
+            yield
+
+        with patch.object(chat_stream, "stream_events", side_effect=broken):
+            response = self.client.post("/api/chat", json=self.payload())
+        events = self.events(response)
+        self.assertEqual([event["type"] for event in events], ["user_message", "error"])
+        self.assertEqual(events[-1]["message"],
+                         "本次未能完成恢复判断：模型没有按要求提交结构化建议。请再发送一次“继续”重试。")
         self.assertEqual(api._running_sessions, set())
 
     def test_history_missing_and_invalid_uuid(self):

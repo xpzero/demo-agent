@@ -110,4 +110,5 @@ class ConnectionMixin:
     def initialize(self) -> None:
         with self.connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
-            connection.executescript(SCHEMA)
+            from .migrations import migrate
+            migrate(connection)

@@ -4,8 +4,8 @@ import { Spinner } from "@/components/shadcn/spinner";
 import { deriveSegments, isAwaitingReply } from "../../utils/segments";
 import ToolCallCard from "../tool-call-card";
 
-/** 从助手事件流派生正文分段及工具执行后的等待状态。 */
-export default function AssistantMessageBody({ events, completed }: { events: AgentEvent[]; completed: boolean }) {
+/** 从助手事件流派生正文分段、等待状态与未完成标记。 */
+export default function AssistantMessageBody({ events, completed, incomplete }: { events: AgentEvent[]; completed: boolean; incomplete: boolean }) {
   const segments = deriveSegments(events);
   return (
     <>
@@ -28,6 +28,11 @@ export default function AssistantMessageBody({ events, completed }: { events: Ag
           return <ToolCallCard key={index} segment={segment} />;
         }
       })}
+      {incomplete && (
+        <Marker className="text-xs">
+          <MarkerContent>回复未完成，已按中断时内容保存</MarkerContent>
+        </Marker>
+      )}
       {isAwaitingReply(events, completed) && (
         <Marker>
           <MarkerIcon><Spinner /></MarkerIcon>

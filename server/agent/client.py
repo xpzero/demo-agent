@@ -16,5 +16,6 @@ client = OpenAI(
 
 # 模型与系统提示词可在 .env 中覆盖；未设置或留空时使用学习项目的默认值
 MODEL = os.getenv("MODEL") or "glm-4.6"
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL") or None
 
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT") or "你是一个有用的助手，可以调用工具来帮助用户。"

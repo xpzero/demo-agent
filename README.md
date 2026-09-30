@@ -118,6 +118,8 @@ demo-agent/
 │   │   ├── __init__.py      # 组装并导出 app
 │   │   ├── routes.py        # HTTP 路由、会话并发保护与 SSE 传输映射
 │   │   ├── chat_stream.py   # 聊天 SSE 编排：事件循环、done 落库与埋点落库
+│   │   ├── event_buffer.py  # 有界事件缓存、独立订阅游标与终态回收
+│   │   ├── resume_stream.py # 恢复仲裁、快照、事件回放与业务收尾跟随
 │   │   └── deps.py          # 数据库入口、路径常量与会话运行锁
 │   ├── database/            # SQLite schema 与 Session/Message/File 数据访问
 │   ├── documents/           # PDF 隔离存储与文件生命周期清理
@@ -170,7 +172,7 @@ demo-agent/
 
 `stream_events` 是唯一的 Agent 内核。它把智谱（OpenAI 兼容协议）的流式 chunk 翻译成项目自己的 `text_delta`、`tool_call`、`tool_result`、`done`、`max_turns` 与 `error`；FastAPI 层把同一事件编码成 SSE。这样前端不用理解模型的完整流式协议，后端内部也不掺杂打印或页面逻辑。
 
-每次 SSE 响应必须以 `done` 或 `error` 结束：出现 `max_turns` 时 API 层会紧随其后追加一帧 `error` 终止；`stream_events` 抛错或未产出终止事件时，API 层同样输出 `error` 再结束。前端 `readSse` 把没有终止事件的 EOF 视为响应中断。整轮回复有总时限（`MAX_RUN_SECONDS`，默认 300 秒），模型网络连接或读取等待上限为 60 秒且禁用 SDK 自动重试，`web_search` / `fetch_url` 各最多等待 30 秒；超时后以 `error` 结束，并释放该会话的运行标记。
+原始 POST 聊天 SSE 响应以 `done` 或 `error` 结束：出现 `max_turns` 时 API 层会紧随其后追加一帧 `error` 终止；`stream_events` 抛错或未产出终止事件时，API 层同样输出 `error` 再结束。前端 `readSse` 把没有终止事件的 EOF 视为响应中断。整轮回复有总时限（`MAX_RUN_SECONDS`，默认 300 秒），模型网络连接或读取等待上限为 60 秒且禁用 SDK 自动重试，`web_search` / `fetch_url` 各最多等待 30 秒；模型推进超时后以 `error` 结束答复流；Run 仍需完成在途业务操作的有限收尾，真实终态落库后才释放会话。
 
 ## 踩过的坑
 
@@ -181,7 +183,7 @@ demo-agent/
 
 ## Session、消息与 PDF 上传
 
-前端用 `crypto.randomUUID()` 生成 `session_id`，不单独创建空会话。第一次 `POST /api/chat` 携带 `parent_message_id: null` 时，后端在同一事务中创建 Session、用户消息及附件关系；后续请求携带上一轮 SSE 返回的消息 ID。`GET /api/sessions` 返回历史摘要，`GET /api/sessions/{session_id}` 返回消息及其附件。`user_message` 事件会在模型执行前返回已持久化的用户消息 ID，因此模型失败后仍可从该节点继续；`done` 事件返回助手消息 ID。
+前端用 `crypto.randomUUID()` 生成 `session_id`，不单独创建空会话。第一次 `POST /api/chat` 携带 `parent_message_id: null` 时，后端在同一事务中创建 Session、用户消息、Run、活跃占位及附件关系；后续请求携带当前消息 ID。`GET /api/sessions` 返回历史摘要，`GET /api/sessions/{session_id}` 返回消息、附件和 `can_send_message`；`GET /api/sessions/{session_id}/resume` 提供恢复 SSE，替代原 `/status` 轮询：有活跃执行时回放事件后跟随实时进度，缓存不可用或执行已结束时返回事实快照，完整空闲会话返回 204。前端将已建立的当前 Session ID 保存在标签页的 `sessionStorage`，刷新后先加载一次完整历史，再按需连接 resume；输入草稿不写入此标识；首条请求发出时保存临时标记，刷新后先核实是否已落库，收到持久化消息 ID 后转为已建立会话。`POST /api/sessions/{session_id}/stop` 由后端原子定位活跃 Run，返回 `processing`、`ended` 或 `no_active_request`；前端只需 Session ID。忙碌的 Chat 返回 HTTP 409 和 `session_busy`，拒绝的消息不入库。`user_message` 事件会在模型执行前返回已持久化用户消息 ID；`done` 返回助手消息 ID；中断的文字保留为未完成消息。
 
 聊天输入框左下角的回形针用于选择单份 PDF，Tooltip 会说明只支持 PDF 和 10 MiB 上限。前端先检查类型、空文件与大小，选择后自动请求 `POST /api/documents`；服务端再次检查扩展名、MIME、`%PDF-` 文件头与实际读取大小。成功返回 `file_id`，原文件保存到 `server/.data/files/<file_id>/original.pdf`，上传元数据只存 SQLite，不再创建 `metadata.json`。Chat 请求通过 `ref_file_ids` 将附件绑定到具体用户消息，MVP 最多一项。
 
@@ -189,15 +191,39 @@ demo-agent/
 
 这是可信本地演示，不能直接公开部署。应用读取 `UploadFile` 前，multipart 处理可能已占用临时空间；公网入口仍需要网关请求体上限、用户身份、配额和更完整的文件生命周期。`%PDF-` 文件头只是初筛，不代表 PDF 结构有效或安全。
 
+## 刷新与切换会话后的恢复
+
+进入会话后，历史仍在处理、末条为用户消息或助手答复未完成时，前端连接 `/resume`。恢复流首先发送 `resume_snapshot`（历史、业务进度、触发用户消息 ID 与是否回放），完整缓存可用时清空该轮助手展示并按原顺序回放，避免重复正文；随后跟随文字与工具事件。缓存不可用时展示持久化事实，不能由未知状态推断工具成功或未执行。
+
+恢复流的 `done` / `error` 不代表 Run 已结束；业务核实可能仍在后台进行。只有真实终态保存后才发送 `stream_end`，前端再拉一次历史，依据 `can_send_message` 决定是否解锁。204 同样需要历史校准。恢复连接失败显示「连接中断，请刷新重试」，不自动重发消息或循环重连。刷新和订阅不会启动模型或重做工具，用户主动发送“继续”才创建新的 Run。
+
+SSE 业务事件附带 `id: <user_message_id>:<seq>`，adapter 支持 `Last-Event-ID` 续传；整页刷新不带旧游标。恢复缓存仅存内存，默认每 Run 最多 4096 条事件、8 MiB，超限后切换为事实快照跟随；每 Run 最多 8 个恢复订阅，终态缓存保留 60 秒。精确回放只保证缓存完整时的文本与工具顺序；重启或降级后的历史不承诺原始交错位置。当前限单进程单 worker，不提供多进程事件共享。详细设计见 [refresh-resume-stream.md](docs/interruption-recovery/refresh-resume-stream.md)。
+
+## Business Adapter 本地演示
+
+`server/recovery/demo_adapter.py` 提供独立 SQLite 订单账本示例。业务适配器先批准精确步骤和参数，`submit` 只返回 `processing` 与业务回执；编排器保存回执后调用 `query` 核实原订单，得到可靠的 `succeeded` 才结束 Run。账本以 Operation ID 为唯一键，重建适配器实例后仍可查询。该演示不调用真实模型或外部业务服务，也不会在普通启动时自动注册。
+
+从 `server/` 运行完整 HTTP 流程：
+
+```bash
+uv run python -m unittest tests.test_demo_business_adapter -v
+```
+
+测试使用 FastAPI TestClient 和模拟模型流，覆盖 Session 状态查询、`POST /api/chat` 后台 Run、批准步骤、业务账本提交与查询、两条观察证据、Run `completed`、历史消息和 `can_send_message` 恢复；另一条路径验证业务查询仍未确认时 Session 保持占位且重复请求返回 409。通过 `app.state.business_adapters = {DemoBusinessAdapter.TOOL: adapter}` 显式注册；接真实业务时换用自己的适配器，并保证查询与取消结果是业务系统的可靠事实。若查询仍未确认，Run 会保持占位直到原截止时间；演示的成功路径可立即核实。
+
+业务适配器 demo（`server/recovery/demo_adapter.py`）之外，第一版还包含延迟业务核实：`server/recovery/reconciler.py` 在 Run 因业务结果未确认进入收尾或进程重启后，持续按原操作 ID 有界查询（默认 2 秒一轮、单次查询 10 秒），确认后保存证据并释放 Session；停止时会先尝试适配器取消。查询始终只针对原操作，不重发业务动作；无法核实时到原截止时间记 `timed_out`。
+
+恢复答复不再是原始 JSON：`done.content` 由核对后的结构化事实组合成中文说明（业务结果、冲突提示与核对时点），原始判定 JSON 只保留在 `tool_result` 事件中。`GET /api/sessions/{id}` 现返回 `progress` 字段，包含历次 Run 的终态与结论、Task/Operation 事实和已批准步骤，刷新后前端可同时看到当时结论与最新业务事实。
+
 ## 已知问题
 
 - `tools/calculate.py` 用 `eval()` 执行模型给的表达式，等于任意代码执行；权限与审批机制移除后模型无需确认即可触发，仅适用于本地学习，不能上线
 - **prompt injection 未真正防住**：`web_search` / `fetch_url` 引入的外部内容可能夹带指令，且现在没有任何写入前确认，模型可能被诱导改写文件
 - `write_file` 无确认直接覆盖文件，没有备份或事务，也还没有“读取外部内容后禁止写入”等隔离
 - 上下文使用 `len(text)` 估算预算；滚动摘要可能逐次蒸馏损失早期细节。摘要失败期间只对游标后的原话做截断，未收编的中间段暂时不可见；原始消息仍在 SQLite。单条待收编原文超过单次收编预算时，本轮跳过摘要且游标不动；需调高 `SUMMARY_ABSORB_BUDGET` 才能收编该条。
-- 没有应用层重试策略；模型请求或流处理异常会转成 `error` 事件，但中断的任务不会自动续跑。可观测性埋点已上线（`agent/metrics.py` + `agent_turns`/`tool_runs` 表 + `chat_messages.meta`）：每轮记录模型请求耗时、流式 usage（智谱接口已验证支持 `include_usage`）与工具执行名/耗时/成败，落库失败只记日志不影响回复；stats 查询接口已上线（GET /api/sessions/{id}/stats 现场聚合），前端已展示会话 stats 和工具执行耗时
+- 本分支新增模型 API 有限重试与可选兼容备用模型，以及 SQLite 版本迁移后的 Run/Task/Operation 事实表；同一 Session 的活跃 Run 由数据库占位。前端可按 Session 连接恢复流和请求停止。故障重启时保留原 Run、预算和未知 Operation，禁止盲目重发；启动时为遗留 Run 安排截止时间核对，预算耗尽才记录超时并释放会话。业务适配层尚未注册具体业务工具；`server/recovery/adapter.py` 定义了批准、单次提交、原操作查询、取消和可靠观察的接口。接入方必须提供适配器后，恢复 Run 才能执行批准步骤或核实未知操作。可观测性埋点已上线（`agent/metrics.py` + `agent_turns`/`tool_runs` 表 + `chat_messages.meta`）：每轮记录模型请求耗时、流式 usage（智谱接口已验证支持 `include_usage`）与工具执行名/耗时/成败，落库失败只记日志不影响回复；stats 查询接口已上线（GET /api/sessions/{id}/stats 现场聚合），前端已展示会话 stats 和工具执行耗时
 - 300 秒整轮时限只在模型 chunk 边界与工具执行前后检查；已进入阻塞的工具调用无法被强行抢占，超时要等调用返回后才生效
-- HTTP 聊天用进程内标志与锁阻止并发运行；多 worker 或多进程部署不受支持
+- HTTP 聊天用 SQLite 活跃 Run 占位拒绝同 Session 并发，后台线程独立于 SSE 连接；单进程执行者模型仍不支持多 worker 并发接手
 
 ## 后续计划
 
@@ -218,8 +244,8 @@ demo-agent/
 ### 2. 并发与会话存储
 
 - SQLite 已保存 Session、最终消息、文件及消息—文件关系；当前没有用户账号或跨用户权限模型
-- 同一 Session 用进程内集合拒绝并发 Chat；不同 Session 可并行，但多 worker / 多进程无法共享这把运行锁
-- 客户端断开后用户消息可能已持久化，模型执行是否继续取决于生成器生命周期；尚无任务恢复机制
+- 同一 Session 用 SQLite 事务中的活跃 Run 占位拒绝并发 Chat；不同 Session 可并行，执行者仅支持单进程
+- 客户端 SSE 断开不终止后台线程；Session 历史和 resume 恢复流可查询已保存进度。进程退出后保留操作事实并清理孤儿 Run，占位释放后可由新消息继续；自动接手原 Run 尚未接入
 
 ### 3. 记忆系统（跨会话记忆）
 

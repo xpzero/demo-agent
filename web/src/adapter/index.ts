@@ -1,6 +1,7 @@
-import { API_BASE, readSse, responseError } from "./transport";
+import { API_BASE, readSse, responseError } from "./transport.ts";
 import type { AgentEvent } from "./types";
 
+export { HttpError } from "./transport.ts";
 export type { AgentEvent } from "./types";
 
 export type SessionSummary = {
@@ -29,6 +30,16 @@ export type SessionHistory = {
     summary_upto_message_id: number | null;
   };
   messages: SessionMessage[];
+  can_send_message: boolean;
+  progress?: SessionProgress;
+};
+
+export type SessionProgress = {
+  runs: { user_message_id: number; status: string; reason: string | null; conclusion: string; created_at: number; finished_at: number | null }[];
+  tasks: { id: number; goal: string; version: number; status: string; status_label: string;
+    operations: { id: number; tool: string; status: string; conflict: boolean; confirmed_result: string | null; business_operation_id: string | null }[];
+    steps: { step_id: string; tool: string; approved: boolean; depends_on: string[] }[];
+  }[];
 };
 
 /** 会话级观测汇总（GET /api/sessions/{id}/stats 现场聚合）。 */
@@ -61,7 +72,9 @@ export async function getSessionStats(
 
 export async function listSessions(signal?: AbortSignal): Promise<SessionSummary[]> {
   const response = await fetch(`${API_BASE}/api/sessions`, { signal });
-  if (!response.ok) throw await responseError(response);
+  if (!response.ok) {
+    throw await responseError(response);
+  }
   const data = (await response.json()) as { sessions: SessionSummary[] };
   return data.sessions;
 }
@@ -79,6 +92,34 @@ export async function getSessionHistory(
     throw await responseError(response);
   }
   return (await response.json()) as SessionHistory;
+}
+
+export type StopResult = { result: "processing" | "ended" | "no_active_request" };
+
+/** 首次恢复不携带游标；仅保留原展示时才可传 lastEventId。 */
+export async function streamResume(sessionId: string, signal?: AbortSignal, lastEventId?: string): Promise<AsyncGenerator<AgentEvent> | null> {
+  const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/resume`, {
+    signal,
+    headers: lastEventId ? { "Last-Event-ID": lastEventId } : undefined,
+  });
+  if (response.status === 204) {
+    return null;
+  }
+  if (!response.ok) {
+    throw await responseError(response);
+  }
+  if (!response.body) {
+    throw new Error("恢复响应没有数据流");
+  }
+  return readSse(response.body, "resume");
+}
+
+export async function stopSession(sessionId: string, signal?: AbortSignal): Promise<StopResult> {
+  const response = await fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/stop`, { method: "POST", signal });
+  if (!response.ok) {
+    throw await responseError(response);
+  }
+  return await response.json() as StopResult;
 }
 
 export type ChatPayload = {
@@ -99,6 +140,8 @@ export async function streamChat(
     body: JSON.stringify(payload),
     signal,
   });
-  if (!response.ok || !response.body) throw await responseError(response);
+  if (!response.ok || !response.body) {
+    throw await responseError(response);
+  }
   return readSse(response.body);
 }
