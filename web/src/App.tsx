@@ -1,154 +1,99 @@
+import UserInput from "@/components/ui/user-input";
+import ChatMessages from "@/components/ui/chat-messages";
+import AppSidebar from "@/components/ui/app-sidebar";
+import SessionStatsBadge from "@/components/ui/session-stats-badge";
+import { Button } from "@/components/shadcn/button";
 import {
-  AssistantRuntimeProvider,
-  ComposerPrimitive,
-  groupPartByType,
-  MessagePrimitive,
-  ThreadPrimitive,
-  useLocalRuntime,
-} from "@assistant-ui/react";
-import type {
-  TextMessagePartProps,
-  ThreadMessageLike,
-} from "@assistant-ui/react";
-import { useEffect, useRef, useState } from "react";
-
-import {
-  ToolGroupContent,
-  ToolGroupRoot,
-  ToolGroupTrigger,
-} from "@/components/assistant-ui/elements/tool-group.aui";
-import {
-  chatAdapter,
-  loadPendingMessages,
-  type InitialSessionState,
-} from "./adapter";
-import "./App.css";
-import { expandPreviewTools, previewMessages } from "./preview";
-import { ToolCallPart } from "./ToolCallPart";
-
-const UserMessage = () => (
-  <MessagePrimitive.Root className="message user">
-    <div className="bubble">
-      <MessagePrimitive.Parts />
-    </div>
-  </MessagePrimitive.Root>
-);
-
-const TextPart = ({ text }: TextMessagePartProps) =>
-  text ? <p>{text}</p> : null;
-
-const AssistantMessage = () => (
-  <MessagePrimitive.Root className="message assistant">
-    <div className="bubble">
-      <MessagePrimitive.GroupedParts
-        groupBy={groupPartByType({ "tool-call": ["group-tool"] })}
-      >
-        {({ part, children }) => {
-          switch (part.type) {
-            case "group-tool":
-              return (
-                <ToolGroupRoot
-                  variant="ghost"
-                  defaultOpen={
-                    expandPreviewTools || part.status.type !== "complete"
-                  }
-                >
-                  <ToolGroupTrigger
-                    count={part.indices.length}
-                    active={part.status.type === "running"}
-                  />
-                  <ToolGroupContent>{children}</ToolGroupContent>
-                </ToolGroupRoot>
-              );
-            case "text":
-              return <TextPart {...part} />;
-            case "tool-call":
-              return part.toolUI ?? <ToolCallPart {...part} />;
-            case "indicator":
-              return null;
-            default:
-              return null;
-          }
-        }}
-      </MessagePrimitive.GroupedParts>
-    </div>
-  </MessagePrimitive.Root>
-);
-
-const Thread = () => (
-  <ThreadPrimitive.Root className="thread">
-    <ThreadPrimitive.Viewport className="viewport">
-      <ThreadPrimitive.Empty>
-        <p className="empty">问点什么吧，比如「北京天气？再算 (38-12)*3」</p>
-      </ThreadPrimitive.Empty>
-      <ThreadPrimitive.Messages
-        components={{ UserMessage, AssistantMessage }}
-      />
-      <ThreadPrimitive.If running>
-        <p className="thinking">思考中…</p>
-      </ThreadPrimitive.If>
-    </ThreadPrimitive.Viewport>
-    <ComposerPrimitive.Root className="composer">
-      <ComposerPrimitive.Input className="input" placeholder="输入消息，回车发送" />
-      <ComposerPrimitive.Send className="send">发送</ComposerPrimitive.Send>
-    </ComposerPrimitive.Root>
-  </ThreadPrimitive.Root>
-);
-
-function RuntimeApp({
-  initialMessages,
-  resumeOnLoad,
-}: {
-  initialMessages: ThreadMessageLike[];
-  resumeOnLoad: boolean;
-}) {
-  const runtime = useLocalRuntime(chatAdapter, {
-    initialMessages,
-  });
-  const resumed = useRef(false);
-
-  useEffect(() => {
-    if (!resumeOnLoad || resumed.current) return;
-    resumed.current = true;
-    const parentId = runtime.thread.getState().messages.at(-1)?.id ?? null;
-    runtime.thread.startRun({ parentId });
-  }, [resumeOnLoad, runtime]);
-
-  return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <Thread />
-    </AssistantRuntimeProvider>
-  );
-}
+  SidebarInset,
+  SidebarProvider,
+  SidebarTrigger,
+} from "@/components/shadcn/sidebar";
+import { TooltipProvider } from "@/components/shadcn/tooltip";
+import { useUserInputStore } from "@/stores";
+import { useSessionStore } from "@/stores/session";
+import { useChat } from "@/hooks/useChat";
+import { useSessions } from "@/hooks/useSessions";
+import { useSessionStats } from "@/hooks/useSessionStats";
 
 export default function App() {
-  const [initialState, setInitialState] = useState<InitialSessionState | null>(
-    previewMessages.length
-      ? { messages: previewMessages, resumeOnLoad: false }
-      : null,
-  );
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const clear = useUserInputStore((state) => state.clear);
+  const sessionGeneration = useSessionStore((state) => state.sessionGeneration);
+  const { sessions, loading, error: sessionsError, refresh } = useSessions();
+  const { stats, refreshStats } = useSessionStats();
+  const {
+    running, stopping, stop, canSend, statusMessage, error, messages, summaryCursor, send, historyReady, loadingHistory, historyError, retryHistory,
+  } = useChat(() => {
+    void refresh();
+    refreshStats();
+  });
+  const busy = running || loadingHistory;
 
-  useEffect(() => {
-    if (initialState !== null) return;
-    loadPendingMessages()
-      .then(setInitialState)
-      .catch(error => {
-        setLoadError(error instanceof Error ? error.message : String(error));
-      });
-  }, [initialState]);
+  const selectSession = (id: string) => {
+    if (busy) {
+      return;
+    }
+    clear();
+    useSessionStore.getState().switchSession(id);
+  };
 
-  if (loadError) {
-    return <p className="empty">恢复会话失败：{loadError}</p>;
-  }
-  if (initialState === null) {
-    return <p className="empty">正在恢复会话…</p>;
-  }
+  const newSession = () => {
+    if (busy) {
+      return;
+    }
+    clear();
+    useSessionStore.getState().newSession();
+  };
 
   return (
-    <RuntimeApp
-      initialMessages={initialState.messages}
-      resumeOnLoad={initialState.resumeOnLoad}
-    />
+    <TooltipProvider>
+      <SidebarProvider className="h-svh">
+        <AppSidebar
+          sessions={sessions}
+          loading={loading}
+          error={sessionsError}
+          busy={busy}
+          onSelectSession={selectSession}
+          onNewSession={newSession}
+          onRefresh={() => { void refresh(); }}
+        />
+        <SidebarInset className="h-full min-h-0 min-w-0 overflow-hidden">
+          <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+            <SidebarTrigger />
+            <h1 className="text-sm font-semibold">Agent Demo</h1>
+            <SessionStatsBadge stats={stats} />
+          </header>
+
+          <main className="flex min-h-0 flex-1 flex-col items-center gap-4 overflow-hidden py-8">
+            <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
+              {loadingHistory ? (
+                <p className="text-sm text-muted-foreground">加载会话中…</p>
+              ) : (
+                <ChatMessages key={sessionGeneration} messages={messages} summaryCursor={summaryCursor} />
+              )}
+            </div>
+            {historyError && (
+              <div className="flex items-center gap-2 text-sm text-red-500">
+                <span>加载会话失败：{historyError}</span>
+                <Button variant="ghost" size="sm" onClick={retryHistory}>重试</Button>
+              </div>
+            )}
+            {error && <p className="text-sm text-red-500">{error}</p>}
+            {statusMessage && <p role="status" className="text-sm text-muted-foreground">{statusMessage}</p>}
+
+            <div className="flex w-full shrink-0 justify-center">
+              <UserInput
+                key={sessionGeneration}
+                onSend={send}
+                running={running}
+                canSend={canSend}
+                onStop={stop}
+                stopping={stopping}
+                historyReady={historyReady}
+              />
+            </div>
+          </main>
+        </SidebarInset>
+      </SidebarProvider>
+    </TooltipProvider>
   );
 }

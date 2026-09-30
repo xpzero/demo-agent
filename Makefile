@@ -31,7 +31,7 @@ dev:
 	wait "$$backend_pid" "$$frontend_pid"
 
 dev-backend:
-	@cd server && uv run uvicorn api:app --reload --host 127.0.0.1 --port 8000
+	@cd server && uv run uvicorn api:app --reload --host :: --port 8000
 
 dev-frontend:
 	@cd web && pnpm dev

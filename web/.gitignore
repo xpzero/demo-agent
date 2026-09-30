@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# CSS Module 类型声明（构建时生成）
+*.d.scss.ts

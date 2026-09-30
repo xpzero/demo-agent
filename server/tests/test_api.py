@@ -1,232 +1,439 @@
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
+from uuid import uuid4
 
-
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-
-from sessions import manager as manager_module  # noqa: E402
-
-
-TEST_DATA = tempfile.TemporaryDirectory()
-manager_module.DATA_DIR = Path(TEST_DATA.name)
+os.environ.setdefault("API_KEY", "test-key")
 
 import api  # noqa: E402
-from agent import approval  # noqa: E402
-from sessions import SessionManager  # noqa: E402
+from api import chat_stream  # noqa: E402
+from database import Database  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 
-def pending_batch():
-    return {
-        "schema_version": 2,
-        "remaining_turns": 9,
-        "outputs_committed": False,
-        "calls": [
-            {
-                "id": "call_write",
-                "name": "write_file",
-                "args": {"path": "notes/demo.txt", "content": "new"},
-                "permission": {
-                    "action": "ask",
-                    "requests": [
-                        {"permission": "write", "target": "notes/demo.txt"}
-                    ],
-                    "reason": "测试规则",
-                },
-                "decision": None,
-                "outcome": None,
-                "output": None,
-                "guard": {
-                    "canonical_path": "/private/server/notes/demo.txt",
-                    "existed": True,
-                    "content_hash": "hash",
-                },
-                "preview": {
-                    "type": "code_diff",
-                    "path": "notes/demo.txt",
-                    "additions": 1,
-                    "deletions": 0,
-                    "lines": [{"kind": "added", "text": "new"}],
-                },
-            }
-        ],
-    }
-
-
-class ApprovalApiTests(unittest.TestCase):
+class ChatApiTests(unittest.TestCase):
     def setUp(self):
-        for path in Path(TEST_DATA.name).glob("*"):
-            path.unlink()
-        api.manager = SessionManager("system")
+        self.directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.directory.name) / "test.sqlite3"
+        self.root = Path(self.directory.name) / "files"
+        self.patches = [
+            patch.object(api.deps, "DATABASE_PATH", self.database_path),
+            patch.object(api.deps, "FILE_ROOT", self.root),
+        ]
+        for item in self.patches:
+            item.start()
         api._running_sessions.clear()
-        api._session_locks.clear()
+        self.database = Database(self.database_path)
+        self.database.initialize()
         self.client = TestClient(api.app)
-        self.session = api.manager.current
-        self.session.items.append({"role": "user", "content": "write"})
-        self.session.pending_approval = pending_batch()
-        api.manager.save(self.session)
+        self.session_id = str(uuid4())
 
-    def test_pending_snapshot_and_chat_conflict(self):
-        snapshot = self.client.get(f"/api/sessions/{self.session.id}")
-        conflict = self.client.post(
-            f"/api/sessions/{self.session.id}/chat",
-            json={"message": "another message"},
+    def tearDown(self):
+        for item in reversed(self.patches):
+            item.stop()
+        self.directory.cleanup()
+
+    def payload(self, **overrides):
+        return {
+            "session_id": self.session_id,
+            "parent_message_id": None,
+            "message": "hi",
+            "ref_file_ids": [],
+            **overrides,
+        }
+
+    def events(self, response):
+        return [json.loads(frame.removeprefix("data: ")) for frame in response.text.strip().split("\n\n")]
+
+    def test_first_chat_creates_session_and_persists_assistant(self):
+        with patch.object(chat_stream, "stream_events", return_value=iter([
+            {"type": "text_delta", "text": "你好"},
+            {"type": "done", "content": "你好"},
+        ])):
+            response = self.client.post("/api/chat", json=self.payload())
+        self.assertEqual(response.status_code, 200)
+        events = self.events(response)
+        self.assertEqual(events[0]["type"], "user_message")
+        self.assertEqual(events[1], {"type": "text_delta", "text": "你好"})
+        self.assertEqual(events[-1]["type"], "done")
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        messages = history["messages"]
+        self.assertEqual([entry["role"] for entry in messages], ["user", "assistant"])
+        self.assertEqual(messages[1]["parent_id"], messages[0]["id"])
+        self.assertEqual(events[-1]["message_id"], messages[1]["id"])
+        self.assertEqual(history["session"]["current_message_id"], messages[1]["id"])
+        self.assertEqual(self.client.get("/api/sessions").json()["sessions"][0]["id"], self.session_id)
+
+    def test_tool_runs_survive_history_reload(self):
+        display = [
+            {"type": "text_delta", "text": "先查"},
+            {"type": "tool_call", "id": "call_1", "name": "get_weather", "args": {"city": "北京"}},
+            {"type": "tool_result", "id": "call_1", "content": "晴", "elapsed": 98.0},
+            {"type": "text_delta", "text": "今天晴"},
+        ]
+        def fake_stream(items, context=None, recorder=None):
+            from agent.metrics import ToolRecord
+            assert recorder is not None
+            turn = recorder.start_turn()
+            for event in display:
+                if event["type"] == "tool_result":
+                    turn.tools.append(ToolRecord(
+                        name="get_weather", args_excerpt="{'city': '北京'}",
+                        result_excerpt="晴", duration_ms=98.0, ok=True,
+                    ))
+                yield event
+            yield {"type": "done", "content": "今天晴"}
+
+        with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
+            response = self.client.post("/api/chat", json=self.payload())
+        self.assertEqual(response.status_code, 200)
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        runs = history["messages"][1]["tool_runs"]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["name"], "get_weather")
+        self.assertEqual(runs[0]["args_excerpt"], "{'city': '北京'}")
+        self.assertEqual(runs[0]["result_excerpt"], "晴")
+        self.assertEqual(runs[0]["duration_ms"], 98.0)
+        self.assertEqual(history["messages"][1]["content"], "先查今天晴")
+        self.assertEqual(self.database.get_message_chain(self.session_id, history["messages"][1]["id"])[-1]["content"], "先查今天晴")
+
+    def test_tool_runs_follow_their_user_turn_even_without_assistant_text(self):
+        from agent.metrics import ToolRecord
+
+        def fake_stream(items, context=None, recorder=None):
+            turn = recorder.start_turn()
+            turn.tools.append(ToolRecord(
+                name="get_weather", args_excerpt="{}", result_excerpt="晴",
+                duration_ms=12, ok=True,
+            ))
+            yield {"type": "done", "content": ""}
+
+        with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
+            self.client.post("/api/chat", json=self.payload())
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        self.assertEqual(history["messages"][1]["tool_runs"][0]["name"], "get_weather")
+        self.assertEqual(history["messages"][1]["content"], "")
+
+    def test_invalid_context_budget_releases_session(self):
+        with patch.dict(os.environ, {"CONTEXT_BUDGET": "invalid"}):
+            with self.assertRaisesRegex(ValueError, "CONTEXT_BUDGET"):
+                self.client.post("/api/chat", json=self.payload())
+        self.assertNotIn(self.session_id, api._running_sessions)
+
+    def test_stale_parent_is_rejected(self):
+        first = self.database.create_user_turn(
+            session_id=self.session_id,
+            parent_message_id=None,
+            content="first",
+            file_ids=[],
         )
+        assistant = self.database.add_assistant_message(
+            session_id=self.session_id,
+            parent_message_id=first,
+            content="answer",
+        )
+        response = self.client.post(
+            "/api/chat",
+            json=self.payload(parent_message_id=first, message="stale"),
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"]["code"], "stale_parent_message")
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        self.assertEqual(history["session"]["current_message_id"], assistant)
+        self.assertEqual(len(history["messages"]), 2)
 
-        self.assertEqual(snapshot.status_code, 200)
+    def test_followup_includes_summary_and_history_exposes_cursor(self):
+        first = self.database.create_user_turn(
+            session_id=self.session_id, parent_message_id=None, content="old", file_ids=[]
+        )
+        assistant = self.database.add_assistant_message(
+            session_id=self.session_id, parent_message_id=first, content="old answer"
+        )
+        self.assertTrue(self.database.update_session_summary(self.session_id, None, "old context", assistant))
+        seen = []
+
+        def stream(items, context=None, recorder=None):
+            seen.extend(items)
+            yield {"type": "done", "content": "new answer"}
+
+        with patch.object(chat_stream, "stream_events", side_effect=stream):
+            response = self.client.post(
+                "/api/chat", json=self.payload(parent_message_id=assistant, message="new")
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["role"] for item in seen], ["system", "user", "user"])
+        self.assertIn("old context", seen[1]["content"])
+        self.assertEqual(seen[-1]["content"], "new")
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        self.assertEqual(history["session"]["summary_upto_message_id"], assistant)
+        self.assertEqual(len(history["messages"]), 4)
+
+    def test_followup_uses_database_chain_and_parent(self):
+        first = self.database.create_user_turn(
+            session_id=self.session_id, parent_message_id=None, content="first", file_ids=[]
+        )
+        assistant = self.database.add_assistant_message(
+            session_id=self.session_id, parent_message_id=first, content="answer"
+        )
+        seen = []
+
+        def stream(items, context=None, recorder=None):
+            seen.extend(items)
+            yield {"type": "done", "content": "second answer"}
+
+        with patch.object(chat_stream, "stream_events", side_effect=stream):
+            response = self.client.post("/api/chat", json=self.payload(parent_message_id=assistant, message="second"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["role"] for item in seen], ["system", "user", "assistant", "user"])
+        self.assertEqual(seen[-1]["content"], "second")
+
+    def test_concurrent_and_validation_failures_do_not_write(self):
+        busy_session = str(uuid4())
+        _, busy_run = self.database.create_run_turn(busy_session, None, "running", [])
+        busy = self.client.post("/api/chat", json=self.payload(session_id=busy_session))
+        self.assertEqual(busy.status_code, 409)
+        self.assertEqual(busy.json()["detail"]["code"], "session_busy")
+        self.assertEqual(len(self.database.get_session_history(busy_session)["messages"]), 1)
+        self.database.finish_run(busy_run, "stopped")
+        response = self.client.post("/api/chat", json=self.payload(parent_message_id=123))
+        self.assertEqual(response.status_code, 404)
+        response = self.client.post("/api/chat", json=self.payload(ref_file_ids=["file_missing"]))
+        self.assertEqual(response.status_code, 404)
+        self.assertIsNone(self.database.get_session_history(self.session_id))
+        self.assertEqual(api._running_sessions, set())
+
+    def test_failed_stream_keeps_user_message_as_parent(self):
+        with patch.object(chat_stream, "stream_events", return_value=iter([
+            {"type": "error", "message": "gateway failed"},
+        ])):
+            response = self.client.post("/api/chat", json=self.payload())
+        self.assertEqual(response.status_code, 200)
+        events = self.events(response)
+        self.assertEqual(events[0]["type"], "user_message")
+        self.assertEqual(events[1]["type"], "error")
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        self.assertEqual(len(history["messages"]), 1)
+        self.assertEqual(history["session"]["current_message_id"], history["messages"][0]["id"])
+        self.assertEqual(api._running_sessions, set())
+
+    def test_stream_without_terminal_event_emits_error_and_releases_session(self):
+        with patch.object(chat_stream, "stream_events", return_value=iter([
+            {"type": "text_delta", "text": "partial"},
+        ])):
+            response = self.client.post("/api/chat", json=self.payload())
         self.assertEqual(
-            snapshot.json()["pending_approval"]["calls"][0]["id"], "call_write"
+            [event["type"] for event in self.events(response)],
+            ["user_message", "text_delta", "error"],
         )
-        self.assertNotIn("guard", snapshot.json()["pending_approval"]["calls"][0])
+        self.assertEqual(api._running_sessions, set())
+
+    def test_max_turns_ends_with_error_and_releases_session(self):
+        with patch.object(chat_stream, "stream_events", return_value=iter([
+            {"type": "max_turns"},
+        ])):
+            response = self.client.post("/api/chat", json=self.payload())
         self.assertEqual(
-            snapshot.json()["pending_approval"]["calls"][0]["permission"],
-            {
-                "action": "ask",
-                "requests": [
-                    {"permission": "write", "target": "notes/demo.txt"}
-                ],
-                "reason": "测试规则",
-            },
+            [event["type"] for event in self.events(response)],
+            ["user_message", "max_turns", "error"],
         )
-        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(api._running_sessions, set())
 
-    def test_pending_snapshot_exposes_three_permission_actions_without_legacy_policy(self):
-        self.session.pending_approval["calls"].append(
-            {
-                "id": "call_denied",
-                "name": "write_file",
-                "args": {
-                    "path": "notes/permission-deny-demo.txt",
-                    "content": "blocked",
-                },
-                "permission": {
-                    "action": "deny",
-                    "requests": [
-                        {
-                            "permission": "write",
-                            "target": "notes/permission-deny-demo.txt",
-                        }
-                    ],
-                    "reason": "测试拒绝规则",
-                },
-                "decision": None,
-                "outcome": "denied",
-                "output": "权限规则拒绝执行工具 write_file；工具未执行。",
-                "guard": None,
-                "preview": None,
-            }
+    def test_stream_exception_emits_error_and_releases_session(self):
+        def broken(_items, context=None, recorder=None):
+            yield {"type": "text_delta", "text": "partial"}
+            raise RuntimeError("stream interrupted")
+        with patch.object(chat_stream, "stream_events", side_effect=broken):
+            response = self.client.post("/api/chat", json=self.payload())
+        self.assertEqual(
+            [event["type"] for event in self.events(response)],
+            ["user_message", "text_delta", "error"],
         )
-        self.session.pending_approval["calls"].append(
-            {
-                "id": "call_allowed",
-                "name": "read_file",
-                "args": {"path": "notes/demo.txt"},
-                "permission": {
-                    "action": "allow",
-                    "requests": [
-                        {"permission": "read", "target": "notes/demo.txt"}
-                    ],
-                    "reason": "测试允许规则",
-                },
-                "decision": None,
-                "outcome": "completed",
-                "output": "old",
-                "guard": None,
-                "preview": None,
-            }
-        )
-        api.manager.save(self.session)
+        self.assertEqual(api._running_sessions, set())
 
-        response = self.client.get(f"/api/sessions/{self.session.id}")
-        calls = response.json()["pending_approval"]["calls"]
-        denied = calls[1]
-        allowed = calls[2]
+    def test_assistant_persistence_failure_emits_error_not_done(self):
+        with patch.object(Database, "upsert_partial_assistant", side_effect=RuntimeError("write failed")):
+            with patch.object(chat_stream, "stream_events", return_value=iter([
+                {"type": "done", "content": "answer"},
+            ])):
+                response = self.client.post("/api/chat", json=self.payload())
+        events = self.events(response)
+        self.assertEqual([event["type"] for event in events], ["user_message", "error"])
+        self.assertEqual(len(self.client.get(f"/api/sessions/{self.session_id}").json()["messages"]), 1)
+        self.assertEqual(api._running_sessions, set())
 
-        self.assertEqual(calls[0]["permission"]["action"], "ask")
-        self.assertEqual(denied["permission"]["action"], "deny")
-        self.assertIsNone(denied["decision"])
-        self.assertEqual(denied["outcome"], "denied")
-        self.assertEqual(allowed["permission"]["action"], "allow")
-        self.assertNotIn("policy", denied)
+    def test_recovery_format_error_maps_to_retryable_user_message(self):
+        # RecoveryFormatError 走面向用户的重试提示，不泄漏异常文本；
+        # 普通 ValueError 保持原始异常形态。
+        from agent.loop import RecoveryFormatError
 
-    def test_chat_save_failure_releases_run_reservation_and_rolls_back_input(self):
-        self.session.pending_approval = None
-        original_items = list(self.session.items)
+        def broken(_items, **_kwargs):
+            raise RecoveryFormatError("恢复判断需要唯一的 recovery_suggestion")
+            yield
 
-        with patch.object(api.manager, "save", side_effect=OSError("disk full")):
-            with self.assertRaises(OSError):
-                self.client.post(
-                    f"/api/sessions/{self.session.id}/chat",
-                    json={"message": "not persisted"},
+        with patch.object(chat_stream, "stream_events", side_effect=broken):
+            response = self.client.post("/api/chat", json=self.payload())
+        events = self.events(response)
+        self.assertEqual([event["type"] for event in events], ["user_message", "error"])
+        self.assertEqual(events[-1]["message"],
+                         "本次未能完成恢复判断：模型没有按要求提交结构化建议。请再发送一次“继续”重试。")
+        self.assertEqual(api._running_sessions, set())
+
+    def test_history_missing_and_invalid_uuid(self):
+        self.assertEqual(self.client.get(f"/api/sessions/{self.session_id}").status_code, 404)
+        self.assertEqual(self.client.get("/api/sessions/not-a-uuid").status_code, 400)
+        self.assertEqual(self.client.post("/api/chat", json=self.payload(
+            session_id="not-a-uuid"
+        )).status_code, 400)
+
+    def test_file_binding_and_history(self):
+        uploaded = self.client.post(
+            "/api/documents", files={"file": ("report.pdf", b"%PDF-content", "application/pdf")}
+        ).json()
+        with patch.object(chat_stream, "stream_events", return_value=iter([{"type": "done", "content": "ok"}])):
+            response = self.client.post("/api/chat", json=self.payload(ref_file_ids=[uploaded["file_id"]]))
+        self.assertEqual(response.status_code, 200)
+        messages = self.client.get(f"/api/sessions/{self.session_id}").json()["messages"]
+        self.assertEqual(messages[0]["files"][0]["id"], uploaded["file_id"])
+        other_session = str(uuid4())
+        response = self.client.post("/api/chat", json=self.payload(
+            session_id=other_session, ref_file_ids=[uploaded["file_id"]]
+        ))
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.client.get(f"/api/sessions/{other_session}").status_code, 404)
+
+
+    def test_metrics_persisted_after_done(self):
+        # P0-2 集成：done 后 agent_turns 锚用户消息、meta 挂助手消息
+        def fake_stream(items, context=None, recorder=None):
+            from agent.metrics import ToolRecord
+
+            turn = recorder.start_turn()
+            turn.duration_ms = 123.0
+            turn.usage = {"prompt_tokens": 100, "completion_tokens": 20}
+            turn.tools.append(
+                ToolRecord(
+                    name="get_weather",
+                    args_excerpt='{"city": "北京"}',
+                    result_excerpt="晴",
+                    duration_ms=5.0,
+                    ok=True,
                 )
+            )
+            yield {"type": "done", "content": "answer"}
 
-        self.assertNotIn(self.session.id, api._running_sessions)
-        self.assertEqual(self.session.items, original_items)
+        with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
+            response = self.client.post("/api/chat", json=self.payload())
+        self.assertEqual(response.status_code, 200)
 
-    def test_approve_is_idempotent_and_resume_executes_once(self):
-        endpoint = (
-            f"/api/sessions/{self.session.id}/approvals/call_write/approve"
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        user_id, assistant_id = (
+            history["messages"][0]["id"],
+            history["messages"][1]["id"],
         )
-        execute = Mock(return_value="已写入 notes/demo.txt（3 字符）")
-        stream_events = Mock(
-            return_value=iter([{"type": "done", "content": "完成"}])
-        )
+        with self.database.connection() as connection:
+            turns = connection.execute(
+                "SELECT * FROM agent_turns"
+            ).fetchall()
+            runs = connection.execute("SELECT * FROM tool_runs").fetchall()
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0]["message_id"], user_id)
+        self.assertEqual(turns[0]["prompt_tokens"], 100)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["name"], "get_weather")
+        self.assertEqual(runs[0]["ok"], 1)
+        meta = self.database.get_message_meta(assistant_id)
+        self.assertEqual(meta["turns"], 1)
+        self.assertEqual(meta["prompt_tokens"], 100)
+        self.assertFalse(meta["estimated"])
 
-        with (
-            patch.object(approval, "execute_approved_tool", execute),
-            patch.object(api, "stream_events", stream_events),
+    def test_metrics_persisted_even_on_error(self):
+        # 中途失败的轮也要留账：账本锚用户消息（轮开始前已存在）
+        def fake_stream(items, context=None, recorder=None):
+            recorder.start_turn()
+            yield {"type": "error", "message": "boom"}
+
+        with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
+            response = self.client.post("/api/chat", json=self.payload())
+        self.assertEqual(response.status_code, 200)
+        with self.database.connection() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) AS n FROM agent_turns"
+            ).fetchone()["n"]
+        self.assertEqual(count, 1)
+
+    def test_metrics_persistence_failure_does_not_break_reply(self):
+        # 落库失败只记日志：SSE 正常收尾，不向用户报错
+        def fake_stream(items, context=None, recorder=None):
+            recorder.start_turn()
+            yield {"type": "done", "content": "answer"}
+
+        with patch.object(
+            Database, "record_agent_turns", side_effect=RuntimeError("db down")
         ):
-            first = self.client.post(endpoint)
-            second = self.client.post(endpoint)
-            resumed = self.client.post(f"/api/sessions/{self.session.id}/resume")
-
-        self.assertEqual(first.status_code, 200)
-        self.assertEqual(second.status_code, 200)
-        execute.assert_called_once()
-        self.assertEqual(stream_events.call_args.kwargs["max_turns"], 9)
-        self.assertIs(stream_events.call_args.args[1], api.services)
-        self.assertIn("已写入 notes/demo.txt", resumed.text)
-        self.assertIsNone(self.session.pending_approval)
-        self.assertEqual(
-            self.session.items[-1],
-            {
-                "type": "function_call_output",
-                "call_id": "call_write",
-                "output": "已写入 notes/demo.txt（3 字符）",
-            },
-        )
-        self.assertEqual(
-            self.client.post(f"/api/sessions/{self.session.id}/resume").status_code,
-            409,
-        )
-
-    def test_reject_never_executes_tool_but_resume_returns_protocol_output(self):
-        rejected = self.client.post(
-            f"/api/sessions/{self.session.id}/approvals/call_write/reject"
-        )
-        execute = Mock()
-
-        with (
-            patch.object(approval, "execute_tool", execute),
-            patch.object(
-                api,
-                "stream_events",
-                return_value=iter([{"type": "done", "content": "已取消"}]),
-            ),
-        ):
-            resumed = self.client.post(f"/api/sessions/{self.session.id}/resume")
-
-        self.assertEqual(rejected.status_code, 200)
-        execute.assert_not_called()
-        self.assertIn("用户拒绝执行工具 write_file", resumed.text)
-        self.assertEqual(
-            self.session.items[-1]["call_id"],
-            "call_write",
-        )
+            with patch.object(chat_stream, "stream_events", side_effect=fake_stream):
+                response = self.client.post("/api/chat", json=self.payload())
+        events = self.events(response)
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual(api._running_sessions, set())
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionStatsApiTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.directory.name) / "test.sqlite3"
+        self.patches = [
+            patch.object(api.deps, "DATABASE_PATH", self.database_path),
+        ]
+        for item in self.patches:
+            item.start()
+        self.database = Database(self.database_path)
+        self.database.initialize()
+        self.client = TestClient(api.app)
+        self.session_id = str(uuid4())
+        self.user_id = self.database.create_user_turn(
+            session_id=self.session_id,
+            parent_message_id=None,
+            content="你好",
+            file_ids=[],
+        )
+
+    def tearDown(self):
+        for item in reversed(self.patches):
+            item.stop()
+        self.directory.cleanup()
+
+    def test_stats_endpoint_returns_aggregates(self):
+        self.database.record_agent_turns(
+            message_id=self.user_id,
+            turns=[
+                {
+                    "duration_ms": 100.0,
+                    "prompt_tokens": 50,
+                    "completion_tokens": 10,
+                    "estimated_prompt_tokens": 50,
+                    "estimated_completion_tokens": 10,
+                    "tools": [],
+                }
+            ],
+        )
+        response = self.client.get(f"/api/sessions/{self.session_id}/stats")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["turns"], 1)
+        self.assertEqual(body["total_prompt_tokens"], 50)
+        self.assertFalse(body["estimated"])
+
+    def test_stats_for_unknown_session_is_404(self):
+        response = self.client.get(f"/api/sessions/{uuid4()}/stats")
+        self.assertEqual(response.status_code, 404)
+
+    def test_stats_for_invalid_uuid_is_400(self):
+        response = self.client.get("/api/sessions/not-a-uuid/stats")
+        self.assertEqual(response.status_code, 400)

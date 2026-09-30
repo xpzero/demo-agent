@@ -1,5 +1,3 @@
-from services.permission import PermissionRequest
-
 from .client import MAX_RESULTS, client, truncate, wrap_untrusted
 
 SCHEMA = {
@@ -20,12 +18,8 @@ SCHEMA = {
 }
 
 
-def permission_requests(args: dict) -> tuple[PermissionRequest, ...]:
-    return (PermissionRequest("web_search", str(args.get("query", "*"))),)
-
-
-def run(args: dict) -> str:
-    response = client().search(query=args["query"], max_results=MAX_RESULTS)
+def run(args: dict, context=None) -> str:
+    response = client().search(query=args["query"], max_results=MAX_RESULTS, timeout=30)
     results = response.get("results", [])
 
     if not results:
