@@ -2,11 +2,10 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from starlette.background import BackgroundTask
 
 from agent import SYSTEM_PROMPT
 from agent.context_budget import build_context
@@ -15,9 +14,13 @@ from documents import MAX_FILE_BYTES, FileUploadError, save_pdf
 from documents.cleanup import cleanup_files
 from tools.context import SessionContext  # noqa: F401  re-export for readability
 
-from .chat_stream import chat_sse_stream
+from .chat_stream import start_run, subscribe_stream
+from .reaper import reap_expired
+from .resume_stream import resume_response
 from . import deps
 from .deps import _lock, _running_sessions, get_database
+from .stop_signals import stop_signals
+from .run_log import run_log
 
 
 @asynccontextmanager
@@ -113,6 +116,11 @@ def chat(body: ChatRequest):
     except StoreError as error:
         raise _http_error(error) from error
 
+    # 判死第二入口（缺口 1）：超期/重启残留先收口，再校验锁
+    reap_expired(database, session_id)
+    if database.get_unfinished_message(session_id) is not None:
+        raise HTTPException(status_code=409, detail="会话正在处理中")
+
     with _lock:
         if session_id in _running_sessions:
             raise HTTPException(status_code=409, detail="当前会话已有任务正在运行")
@@ -157,15 +165,49 @@ def chat(body: ChatRequest):
 
     # 编排细节（事件循环、done 落库、埋点落库）在 chat_stream；
     # 这里只负责请求校验、会话锁与 StreamingResponse 组装
-    return StreamingResponse(
-        chat_sse_stream(
-            database=database,
-            session_id=session_id,
-            user_message_id=user_message_id,
-            items=items,
-            file_root=deps.FILE_ROOT,
-            release_session=release_session,
-        ),
-        media_type="text/event-stream",
-        background=BackgroundTask(release_session),
+    stop_signal = stop_signals.create(session_id)
+    assistant_id = start_run(
+        database=database,
+        session_id=session_id,
+        user_message_id=user_message_id,
+        items=items,
+        file_root=deps.FILE_ROOT,
+        release_session=release_session,
+        stop_signal=stop_signal,
     )
+    return StreamingResponse(
+        subscribe_stream(assistant_id=assistant_id, user_message_id=user_message_id),
+        media_type="text/event-stream",
+    )
+
+
+@app.post("/api/sessions/{session_id}/stop")
+def stop_session(session_id: str):
+    """场景 C：停止意图落库（字据）+ 内存信号（喊话）；不等待收口。"""
+    database = get_database()
+    try:
+        session_id = database.normalize_session_id(session_id)
+    except StoreError as error:
+        raise _http_error(error) from error
+    result = database.request_stop(session_id)
+    stop_signals.set(session_id)
+    if result["result"] == "processing":
+        run_log.info("stop", "用户请求停止", message_id=result["message_id"])
+    return result
+
+
+@app.get("/api/sessions/{session_id}/resume")
+async def resume_session(session_id: str, request: Request):
+    """场景 A/B/D/E：三步裁决（204 / 判死快照 / 活流回放）。"""
+    database = get_database()
+    try:
+        session_id = database.normalize_session_id(session_id)
+    except StoreError as error:
+        raise _http_error(error) from error
+    return resume_response(database, session_id, request)
+
+
+@app.get("/api/logs")
+def get_logs(after: int = 0):
+    """运行日志增量拉取（前端运行面板轮询）。"""
+    return {"entries": run_log.scan(after)}

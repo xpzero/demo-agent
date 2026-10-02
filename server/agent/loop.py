@@ -1,6 +1,7 @@
 import json
 import time
 from collections.abc import Iterator
+from threading import Event
 
 from tools import TOOLS, execute_tool
 from tools.context import SessionContext
@@ -8,12 +9,21 @@ from tools.context import SessionContext
 from .client import MODEL, client
 from .metrics import ToolRecord, TurnRecorder, excerpt
 
-MAX_RUN_SECONDS = 300
+MAX_RUN_SECONDS = 180
+
+
+class StopRequestedError(Exception):
+    """用户请求停止（协作式）：执行线程在边界检查点抛出，由编排层收口。"""
 
 
 def _check_deadline(deadline: float) -> None:
     if time.monotonic() >= deadline:
         raise TimeoutError("本轮回复超时，请重试")
+
+
+def _check_stop(stop_signal: Event | None) -> None:
+    if stop_signal is not None and stop_signal.is_set():
+        raise StopRequestedError("用户请求停止")
 
 # 工具 SCHEMA 是扁平格式，Chat Completions 请求需要多一层 function 外壳
 CHAT_TOOLS = [
@@ -58,7 +68,7 @@ def _merge_tool_call_delta(
 
 def _aggregate_stream(
     stream, text_parts: list[str], partial_tool_calls: dict[int, dict], deadline: float,
-    current_turn=None,
+    current_turn=None, stop_signal: Event | None = None,
 ) -> Iterator[dict]:
     """消费模型的 chunk 流：文本增量向外透传，工具调用增量按 index 聚齐。
 
@@ -68,6 +78,7 @@ def _aggregate_stream(
     # 工具调用参数按 chunk 增量到达，必须按 index 聚齐后再解析
     for chunk in stream:
         _check_deadline(deadline)
+        _check_stop(stop_signal)
         if current_turn is not None:
             usage = _extract_usage(chunk)
             if usage:
@@ -121,6 +132,7 @@ def _run_tool_calls(
     deadline: float,
     context: SessionContext | None,
     current_turn=None,
+    stop_signal: Event | None = None,
 ) -> Iterator[dict]:
     """按模型给出的顺序逐个执行：结果写回 items，tool_call_id 原样复用。
 
@@ -129,6 +141,7 @@ def _run_tool_calls(
     """
     for tool_call, args in tool_calls_with_args:
         _check_deadline(deadline)
+        _check_stop(stop_signal)
         yield {
             "type": "tool_call",
             "id": tool_call["id"],
@@ -138,6 +151,7 @@ def _run_tool_calls(
         tool_started = time.monotonic()
         tool_output, tool_ok = execute_tool(tool_call["name"], args, context)
         _check_deadline(deadline)
+        _check_stop(stop_signal)
         tool_elapsed_ms = (time.monotonic() - tool_started) * 1000
         if current_turn is not None:
             current_turn.tools.append(
@@ -185,6 +199,7 @@ def stream_events(
     max_turns: int = 10,
     context: SessionContext | None = None,
     recorder: TurnRecorder | None = None,
+    stop_signal: Event | None = None,
 ) -> Iterator[dict]:
     """agent loop 的核心：流式请求模型、执行工具，把过程产出为结构化事件。
 
@@ -200,6 +215,7 @@ def stream_events(
     try:
         for _ in range(max_turns):
             _check_deadline(deadline)
+            _check_stop(stop_signal)
             current_turn = recorder.start_turn() if recorder is not None else None
             if current_turn is not None:
                 current_turn.items_snapshot = [
@@ -219,7 +235,7 @@ def stream_events(
             started = time.monotonic()
             yield from _aggregate_stream(
                 stream, text_parts, partial_tool_calls, deadline,
-                current_turn=current_turn,
+                current_turn=current_turn, stop_signal=stop_signal,
             )
             if current_turn is not None:
                 current_turn.duration_ms = (time.monotonic() - started) * 1000
@@ -244,8 +260,10 @@ def stream_events(
             items.append(
                 _build_assistant_message("".join(text_parts), tool_calls)
             )
-            yield from _run_tool_calls(tool_calls_with_args, items, deadline, context, current_turn)
+            yield from _run_tool_calls(tool_calls_with_args, items, deadline, context, current_turn, stop_signal)
 
         yield {"type": "max_turns"}
+    except StopRequestedError:
+        raise  # 停止是编排层的收口路径，不是模型错误；交 chat_stream 落 stopped
     except Exception as error:
         yield {"type": "error", "message": f"{type(error).__name__}: {error}"}

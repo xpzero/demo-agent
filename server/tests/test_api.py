@@ -74,7 +74,7 @@ class ChatApiTests(unittest.TestCase):
             {"type": "tool_result", "id": "call_1", "content": "晴", "elapsed": 98.0},
             {"type": "text_delta", "text": "今天晴"},
         ]
-        def fake_stream(items, context=None, recorder=None):
+        def fake_stream(items, context=None, recorder=None, stop_signal=None):
             from agent.metrics import ToolRecord
             assert recorder is not None
             turn = recorder.start_turn()
@@ -103,7 +103,7 @@ class ChatApiTests(unittest.TestCase):
     def test_tool_runs_follow_their_user_turn_even_without_assistant_text(self):
         from agent.metrics import ToolRecord
 
-        def fake_stream(items, context=None, recorder=None):
+        def fake_stream(items, context=None, recorder=None, stop_signal=None):
             turn = recorder.start_turn()
             turn.tools.append(ToolRecord(
                 name="get_weather", args_excerpt="{}", result_excerpt="晴",
@@ -155,7 +155,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertTrue(self.database.update_session_summary(self.session_id, None, "old context", assistant))
         seen = []
 
-        def stream(items, context=None, recorder=None):
+        def stream(items, context=None, recorder=None, stop_signal=None):
             seen.extend(items)
             yield {"type": "done", "content": "new answer"}
 
@@ -180,7 +180,7 @@ class ChatApiTests(unittest.TestCase):
         )
         seen = []
 
-        def stream(items, context=None, recorder=None):
+        def stream(items, context=None, recorder=None, stop_signal=None):
             seen.extend(items)
             yield {"type": "done", "content": "second answer"}
 
@@ -201,7 +201,8 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/sessions").json()["sessions"], [])
         self.assertEqual(api._running_sessions, set())
 
-    def test_failed_stream_keeps_user_message_as_parent(self):
+    def test_failed_stream_persists_error_assistant_row(self):
+        # 场景 D 定稿：错误也要有迹可寻——预建助手行落 error 终态
         with patch.object(chat_stream, "stream_events", return_value=iter([
             {"type": "error", "message": "gateway failed"},
         ])):
@@ -211,8 +212,12 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(events[0]["type"], "user_message")
         self.assertEqual(events[1]["type"], "error")
         history = self.client.get(f"/api/sessions/{self.session_id}").json()
-        self.assertEqual(len(history["messages"]), 1)
-        self.assertEqual(history["session"]["current_message_id"], history["messages"][0]["id"])
+        # 用户消息 + error 终态的助手行；父链完整
+        self.assertEqual(len(history["messages"]), 2)
+        assistant = history["messages"][1]
+        self.assertEqual(assistant["role"], "assistant")
+        self.assertEqual(assistant["finish_kind"], "error")
+        self.assertEqual(history["session"]["current_message_id"], assistant["id"])
         self.assertEqual(api._running_sessions, set())
 
     def test_stream_without_terminal_event_emits_error_and_releases_session(self):
@@ -233,12 +238,14 @@ class ChatApiTests(unittest.TestCase):
             response = self.client.post("/api/chat", json=self.payload())
         self.assertEqual(
             [event["type"] for event in self.events(response)],
-            ["user_message", "max_turns", "error"],
+            ["user_message", "max_turns"],
         )
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        self.assertEqual(history["messages"][1]["finish_kind"], "max_turns")
         self.assertEqual(api._running_sessions, set())
 
     def test_stream_exception_emits_error_and_releases_session(self):
-        def broken(_items, context=None, recorder=None):
+        def broken(_items, context=None, recorder=None, stop_signal=None):
             yield {"type": "text_delta", "text": "partial"}
             raise RuntimeError("stream interrupted")
         with patch.object(chat_stream, "stream_events", side_effect=broken):
@@ -247,17 +254,29 @@ class ChatApiTests(unittest.TestCase):
             [event["type"] for event in self.events(response)],
             ["user_message", "text_delta", "error"],
         )
+        # 半截文字回填进助手行（崩溃/异常路径以库为准）
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        self.assertEqual(history["messages"][1]["content"], "partial")
+        self.assertEqual(history["messages"][1]["finish_kind"], "error")
         self.assertEqual(api._running_sessions, set())
 
-    def test_assistant_persistence_failure_emits_error_not_done(self):
-        with patch.object(Database, "add_assistant_message", side_effect=RuntimeError("write failed")):
+    def test_finalize_failure_emits_error_not_done(self):
+        # finalize 落库失败：error 事件发出，助手行保持 unfinished（不误标终态）
+        real_finalize = Database.finalize_assistant
+        def flaky(self_db, message_id, kind, content=None):
+            if kind == "done":
+                raise RuntimeError("write failed")
+            return real_finalize(self_db, message_id, kind, content)
+        with patch.object(Database, "finalize_assistant", flaky):
             with patch.object(chat_stream, "stream_events", return_value=iter([
                 {"type": "done", "content": "answer"},
             ])):
                 response = self.client.post("/api/chat", json=self.payload())
         events = self.events(response)
-        self.assertEqual([event["type"] for event in events], ["user_message", "error"])
-        self.assertEqual(len(self.client.get(f"/api/sessions/{self.session_id}").json()["messages"]), 1)
+        self.assertEqual(events[-1]["type"], "error")
+        # done 收口失败后 error 兜底收口成功：行终态为 error，不冒充 done
+        history = self.client.get(f"/api/sessions/{self.session_id}").json()
+        self.assertEqual(history["messages"][1]["finish_kind"], "error")
         self.assertEqual(api._running_sessions, set())
 
     def test_history_missing_and_invalid_uuid(self):
@@ -286,7 +305,7 @@ class ChatApiTests(unittest.TestCase):
 
     def test_metrics_persisted_after_done(self):
         # P0-2 集成：done 后 agent_turns 锚用户消息、meta 挂助手消息
-        def fake_stream(items, context=None, recorder=None):
+        def fake_stream(items, context=None, recorder=None, stop_signal=None):
             from agent.metrics import ToolRecord
 
             turn = recorder.start_turn()
@@ -330,7 +349,7 @@ class ChatApiTests(unittest.TestCase):
 
     def test_metrics_persisted_even_on_error(self):
         # 中途失败的轮也要留账：账本锚用户消息（轮开始前已存在）
-        def fake_stream(items, context=None, recorder=None):
+        def fake_stream(items, context=None, recorder=None, stop_signal=None):
             recorder.start_turn()
             yield {"type": "error", "message": "boom"}
 
@@ -345,7 +364,7 @@ class ChatApiTests(unittest.TestCase):
 
     def test_metrics_persistence_failure_does_not_break_reply(self):
         # 落库失败只记日志：SSE 正常收尾，不向用户报错
-        def fake_stream(items, context=None, recorder=None):
+        def fake_stream(items, context=None, recorder=None, stop_signal=None):
             recorder.start_turn()
             yield {"type": "done", "content": "answer"}
 
