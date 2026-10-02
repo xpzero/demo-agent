@@ -5,5 +5,7 @@ export type AgentEvent =
   | { type: "tool_call"; id: string; name: string; args: { [key: string]: unknown } | string; excerpt?: boolean }
   | { type: "tool_result"; id: string; content: string; elapsed?: number }
   | { type: "done"; content: string; message_id: number }
-  | { type: "max_turns" }
-  | { type: "error"; message: string };
+  | { type: "max_turns"; message_id?: number }
+  | { type: "stopped"; message_id: number }
+  | { type: "error"; message: string; message_id?: number }
+  | { type: "resume_snapshot"; history: unknown };

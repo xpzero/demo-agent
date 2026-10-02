@@ -16,6 +16,7 @@ export type SessionMessage = {
   parent_id: number | null;
   role: "user" | "assistant";
   status: string;
+  finish_kind?: string | null;
   content: string;
   /** 按本轮用户消息关联的工具账本（仅含存档短文本）。 */
   tool_runs?: { id: number; name: string; args_excerpt: string; result_excerpt: string; duration_ms: number | null }[];
@@ -87,6 +88,39 @@ export type ChatPayload = {
   message: string;
   ref_file_ids: string[];
 };
+
+/** 请求停止当前会话的执行（后端协作式收口）。 */
+export async function stopSession(sessionId: string): Promise<{ result: string }> {
+  const response = await fetch(
+    `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/stop`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    throw await responseError(response);
+  }
+  return (await response.json()) as { result: string };
+}
+
+/**
+ * 恢复会话的进行中流：204 → null（无进行中消息）；
+ * 200 → SSE 流（活流回放或终态快照，resume_snapshot 单帧后关流）。
+ */
+export async function resumeSession(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<AsyncGenerator<AgentEvent> | null> {
+  const response = await fetch(
+    `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/resume`,
+    { signal },
+  );
+  if (response.status === 204) {
+    return null;
+  }
+  if (!response.ok || !response.body) {
+    throw await responseError(response);
+  }
+  return readSse(response.body);
+}
 
 /** 发送一条聊天消息，返回 SSE 事件流。 */
 export async function streamChat(

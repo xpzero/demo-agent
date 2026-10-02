@@ -2,6 +2,7 @@ import UserInput from "@/components/ui/user-input";
 import ChatMessages from "@/components/ui/chat-messages";
 import AppSidebar from "@/components/ui/app-sidebar";
 import SessionStatsBadge from "@/components/ui/session-stats-badge";
+import RunLogPanel from "@/components/ui/run-log-panel";
 import { Button } from "@/components/shadcn/button";
 import {
   SidebarInset,
@@ -21,7 +22,7 @@ export default function App() {
   const { sessions, loading, error: sessionsError, refresh } = useSessions();
   const { stats, refreshStats } = useSessionStats();
   const {
-    running, error, messages, summaryCursor, send, historyReady, loadingHistory, historyError, retryHistory,
+    running, resuming, error, messages, summaryCursor, send, stop, historyReady, loadingHistory, historyError, retryHistory,
   } = useChat(() => {
     void refresh();
     refreshStats();
@@ -56,7 +57,8 @@ export default function App() {
           onNewSession={newSession}
           onRefresh={() => { void refresh(); }}
         />
-        <SidebarInset className="h-full min-h-0 min-w-0 overflow-hidden">
+        <SidebarInset className="relative h-full min-h-0 min-w-0 overflow-hidden">
+          <RunLogPanel />
           <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
             <SidebarTrigger />
             <h1 className="text-sm font-semibold">Agent Demo</h1>
@@ -83,7 +85,8 @@ export default function App() {
               <UserInput
                 key={sessionGeneration}
                 onSend={send}
-                running={running || !historyReady}
+                onStop={() => { void stop(); }}
+                running={running || resuming || !historyReady}
                 historyReady={historyReady}
               />
             </div>

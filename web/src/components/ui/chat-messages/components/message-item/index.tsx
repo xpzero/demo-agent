@@ -18,7 +18,11 @@ export default function MessageItem({ message }: { message: ChatMessage }) {
               </BubbleContent>
             </Bubble>
           ) : (
-            <AssistantMessageBody events={message.events} completed={message.messageId !== undefined} />
+            <AssistantMessageBody
+              events={message.events}
+              completed={message.messageId !== undefined}
+              finishKind={message.finishKind}
+            />
           )}
           <MessageMeta message={message} />
         </MessageContent>

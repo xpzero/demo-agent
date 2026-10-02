@@ -12,6 +12,9 @@ export async function responseError(response: Response): Promise<Error> {
   return new Error(message ?? `请求失败：${response.status}`);
 }
 
+/** 半死连接上限：超过此时长无任何字节（含心跳）判定连接死亡。 */
+const STALL_TIMEOUT_MS = 30_000;
+
 /** 逐行解析 SSE：chunk 可能含多条或半条消息，按空行分帧。 */
 export async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator<AgentEvent> {
   const reader = body.getReader();
@@ -20,7 +23,16 @@ export async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator
   let terminated = false;
 
   while (true) {
-    const { done, value } = await reader.read();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const { done, value } = await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("连接超时：服务器长时间无响应")), STALL_TIMEOUT_MS);
+      }),
+    ]);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
     if (done) {
       // EOF 时还剩半帧，说明流被截断，不能当正常结束。
       if (buffer.trim() !== "") {
@@ -43,7 +55,9 @@ export async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator
           throw new Error("响应格式错误：结束后仍有事件");
         }
         const event = JSON.parse(frame.slice(6)) as AgentEvent;
-        terminated = event.type === "done" || event.type === "error";
+        terminated =
+          event.type === "done" || event.type === "error" ||
+          event.type === "stopped" || event.type === "max_turns";
         yield event;
       }
     }

@@ -2,7 +2,15 @@ import type { AgentEvent } from "@/adapter";
 
 export type ChatMessage =
   | { kind: "user"; id: string; text: string; createdAt: number; messageId?: number }
-  | { kind: "assistant"; id: string; events: AgentEvent[]; createdAt: number; messageId?: number };
+  | {
+      kind: "assistant";
+      id: string;
+      events: AgentEvent[];
+      createdAt: number;
+      messageId?: number;
+      /** 库内消息状态：unfinished 表示执行中（恢复判据）；终态消息来自历史接口。 */
+      finishKind?: string;
+    };
 
 export function getMessageText(message: ChatMessage): string {
   if (message.kind === "user") return message.text;

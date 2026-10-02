@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
-import { Paperclip } from "lucide-react";
+import { Paperclip, Square } from "lucide-react";
 import { useUserInputStore } from "@/stores/user";
 import { useDocumentUpload } from "@/hooks/useDocumentUpload";
 import DocumentAttachment from "@/components/ui/document-attachment";
@@ -15,13 +15,15 @@ import {
 interface UserInputProps {
   /** 发送一条消息 */
   onSend: (text: string, refFileIds: string[]) => void;
+  /** 请求停止当前执行（后端协作式收口） */
+  onStop: () => void;
   /** 是否有请求正在运行 */
   running: boolean;
   /** 当前会话的消息历史已准备好 */
   historyReady: boolean;
 }
 
-export default function UserInput({ onSend, running, historyReady }: UserInputProps) {
+export default function UserInput({ onSend, onStop, running, historyReady }: UserInputProps) {
   const ref = useRef<HTMLDivElement>(null);
   const didAutoFocus = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -141,9 +143,16 @@ export default function UserInput({ onSend, running, historyReady }: UserInputPr
           </Tooltip>
         </div>
         <div className={styles.userInputHandleAreaRight}>
-          <Button onClick={submit} disabled={running}>
-            发送
-          </Button>
+          {running ? (
+            <Button type="button" variant="default" onClick={onStop} aria-label="停止">
+              <Square className="fill-current" size={14} />
+              停止
+            </Button>
+          ) : (
+            <Button onClick={submit} disabled={!historyReady}>
+              发送
+            </Button>
+          )}
         </div>
       </div>
     </div>

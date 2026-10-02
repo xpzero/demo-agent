@@ -16,14 +16,52 @@ type SessionState = {
   newSession: () => void;
 };
 
+const LAST_SESSION_KEY = "demo-agent:last-session";
+
+/**
+ * 刷新保持会话：beforeunload 写入当前 sessionId，重载时读回。
+ * 「新会话」按钮与首次访问（无记录）不恢复。
+ */
+function restoreSession(): { sessionId: string; isNewSession: boolean } {
+  try {
+    const saved = localStorage.getItem(LAST_SESSION_KEY);
+    if (saved) {
+      localStorage.removeItem(LAST_SESSION_KEY);
+      return { sessionId: saved, isNewSession: false };
+    }
+  } catch {
+    // localStorage 不可用时退回新建
+  }
+  return { sessionId: crypto.randomUUID(), isNewSession: true };
+}
+
+function persistSession(sessionId: string, isNewSession: boolean) {
+  try {
+    if (isNewSession) {
+      localStorage.removeItem(LAST_SESSION_KEY);
+    } else {
+      localStorage.setItem(LAST_SESSION_KEY, sessionId);
+    }
+  } catch {
+    // 忽略持久化失败
+  }
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", () => {
+    const state = useSessionStore.getState();
+    persistSession(state.sessionId, state.isNewSession);
+  });
+}
+
 export const useSessionStore = create<SessionState>((set, get) => {
-  const sessionId = crypto.randomUUID();
+  const { sessionId, isNewSession } = restoreSession();
   return {
     sessionId,
     pendingSession: null,
     sessionGeneration: 0,
     currentMessageId: null,
-    isNewSession: true,
+    isNewSession,
     setCurrentMessageId: (id) => set((state) => ({
       currentMessageId: id,
       isNewSession: id === null ? state.isNewSession : false,

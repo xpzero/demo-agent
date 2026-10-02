@@ -10,6 +10,11 @@ export function historyToMessages(messages: SessionMessage[]): ChatMessage[] {
           id: String(message.id),
           createdAt: message.created_at,
           messageId: message.id,
+          ...(message.status === "unfinished"
+            ? { finishKind: "unfinished" as const }
+            : message.finish_kind
+              ? { finishKind: message.finish_kind }
+              : {}),
           events: [
             ...(message.tool_runs ?? []).flatMap((run) => [
               { type: "tool_call" as const, id: String(run.id), name: run.name, args: run.args_excerpt, excerpt: true },
