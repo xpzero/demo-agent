@@ -47,6 +47,10 @@ export default function UserInput({ onSend, onStop, running, historyReady }: Use
       uploadState.status === "uploaded" ? [uploadState.document.file_id] : [];
     onSend(text, refFileIds);
     clear();
+    // contentEditable 非受控：store 清空之外还要清 DOM，否则文字残留
+    if (ref.current) {
+      ref.current.textContent = "";
+    }
     if (refFileIds.length > 0) {
       documentUpload.reset();
     }
