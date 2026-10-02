@@ -1,17 +1,22 @@
-"""组合入口：Database 以 mixin 汇聚连接、会话与文件域能力。"""
+"""组合入口：Database 以 mixin 汇聚连接、会话、文件、生命周期与观测域能力。"""
 
 from .connection import ConnectionMixin
 from .files import FileStoreMixin
+from .lifecycle import MessageLifecycleMixin
 from .metrics import MetricsStoreMixin
 from .sessions import SessionStoreMixin
 
 __all__ = ["Database"]
 
 
-class Database(ConnectionMixin, SessionStoreMixin, FileStoreMixin, MetricsStoreMixin):
+class Database(
+    ConnectionMixin, SessionStoreMixin, FileStoreMixin,
+    MessageLifecycleMixin, MetricsStoreMixin,
+):
     """SQLite 数据访问门面：对外保持 database.xxx() 调用面不变。"""
 
     def initialize(self) -> None:
         super().initialize()
         self.initialize_session_summary()
         self.initialize_metrics()
+        self.initialize_message_lifecycle()

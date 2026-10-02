@@ -1,10 +1,16 @@
 """SQLite 连接、事务与建表：数据访问层的公共底座。"""
 
+import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-DATABASE_PATH = Path(__file__).resolve().parents[1] / ".data" / "demo-agent.sqlite3"
+DATABASE_PATH = Path(
+    os.environ.get(
+        "DEMO_AGENT_DATABASE",
+        str(Path(__file__).resolve().parents[1] / ".data" / "demo-agent.sqlite3"),
+    )
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chat_sessions (
