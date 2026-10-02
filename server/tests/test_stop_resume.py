@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 class StopResumeTestBase(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
+        self.directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.database_path = Path(self.directory.name) / "test.sqlite3"
         self.root = Path(self.directory.name) / "files"
         self.patches = [

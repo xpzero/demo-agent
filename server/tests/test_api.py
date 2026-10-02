@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -16,7 +17,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 class ChatApiTests(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
+        self.directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.database_path = Path(self.directory.name) / "test.sqlite3"
         self.root = Path(self.directory.name) / "files"
         self.patches = [
@@ -30,6 +31,15 @@ class ChatApiTests(unittest.TestCase):
         self.database.initialize()
         self.client = TestClient(api.app)
         self.session_id = str(uuid4())
+        # 执行体在后台线程：tearDown 前等它跑完，否则 tempdir 删除后线程还在写库
+        self.addCleanup(self._drain_executors)
+
+    def _drain_executors(self):
+        for _ in range(100):
+            if api._running_sessions == set():
+                return
+            time.sleep(0.05)
+        raise AssertionError("执行线程未在 5 秒内结束，可能存在泄漏")
 
     def tearDown(self):
         for item in reversed(self.patches):
@@ -384,7 +394,7 @@ if __name__ == "__main__":
 
 class SessionStatsApiTests(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
+        self.directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.database_path = Path(self.directory.name) / "test.sqlite3"
         self.patches = [
             patch.object(api.deps, "DATABASE_PATH", self.database_path),

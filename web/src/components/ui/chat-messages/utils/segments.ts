@@ -52,7 +52,12 @@ export function deriveSegments(events: AgentEvent[]): Segment[] {
     } else if (event.type === "max_turns") {
       segments.push({ kind: "note", text: "已达到最大轮次" });
     } else if (event.type === "done" && !event.content) {
-      segments.push({ kind: "note", text: "模型返回了空回复" });
+      // 判据收紧：done 无 content 但同轮已有正文片段时，是终态帧未带全文（旧数据/回放），
+      // 不是真的空回复；正文以已收到的 text_delta 为准。
+      const hasText = segments.some((item) => item.kind === "text" && item.text.length > 0);
+      if (!hasText) {
+        segments.push({ kind: "note", text: "模型返回了空回复" });
+      }
     } else if (event.type === "stopped") {
       segments.push({ kind: "note", text: "已停止输出" });
     } else if (event.type === "error") {

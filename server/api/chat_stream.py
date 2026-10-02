@@ -95,9 +95,11 @@ class _FragmentSink:
             status="finished",
         )
 
-    def terminal(self, kind: str, **fields) -> dict:
-        """终态 fragment + 广播；返回对外事件。"""
+    def terminal(self, kind: str, content: str | None = None, **fields) -> dict:
+        """终态 fragment + 广播；返回对外事件。done 携带全文（回放方需要）。"""
         payload = {"type": kind, **fields}
+        if kind == "done" and content:
+            payload["content"] = content
         seq = self.database.append_fragment(self.message_id, "terminal", payload)
         active_runs.publish(self.message_id, payload, seq)
         return payload
@@ -144,7 +146,7 @@ def run_executor(
         run_log.info(
             "chat_stream", f"终态 {kind}", message_id=assistant_id, chars=len(content or ""))
         release_session_once()
-        sink.terminal(kind, message_id=assistant_id, **fields)
+        sink.terminal(kind, content=content, message_id=assistant_id, **fields)
 
     try:
         active_runs.publish(user_message_id, {"type": "user_message", "message_id": user_message_id}, seq=0)
