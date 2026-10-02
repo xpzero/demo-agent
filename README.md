@@ -117,7 +117,12 @@ demo-agent/
 │   ├── api/                 # FastAPI 应用包（uvicorn api:app）
 │   │   ├── __init__.py      # 组装并导出 app
 │   │   ├── routes.py        # HTTP 路由、会话并发保护与 SSE 传输映射
-│   │   ├── chat_stream.py   # 聊天 SSE 编排：事件循环、done 落库与埋点落库
+│   │   ├── chat_stream.py   # 两层分离：run_executor 后台执行线程 + subscribe_stream SSE 订阅
+│   │   ├── active_runs.py   # 进程内运行态 Run：事件缓冲 + 订阅者队列（终态即弃）
+│   │   ├── resume_stream.py # GET resume 三步裁决（204 / 判死快照 / 活流回放）
+│   │   ├── reaper.py        # 判死者：is_dead_residual 唯一判定 + finalize_dead 收口
+│   │   ├── stop_signals.py  # 停止内存信号（喊话层，配合库里 stop_requested 字据层）
+│   │   ├── run_log.py       # 运行日志环形缓冲（GET /api/logs 增量拉取）
 │   │   └── deps.py          # 数据库入口、路径常量与会话运行锁
 │   ├── database/            # SQLite schema 与 Session/Message/File 数据访问
 │   ├── documents/           # PDF 隔离存储与文件生命周期清理
@@ -134,11 +139,11 @@ demo-agent/
 │   └── .env                 # API key 与 base url
 └── web/                     # Vite + React 前端
     └── src/
-        ├── adapter/         # 调后端、解析 SSE、还原项目事件
+        ├── adapter/         # 调后端、解析 SSE（含 30s 看门狗）、还原项目事件、运行日志拉取
         ├── chat/            # 前端消息模型、历史映射与流式事件更新纯函数
-        ├── hooks/           # 当前会话消息加载、发送与会话列表请求
-        ├── components/      # 侧边栏、消息展示和输入框
-        └── stores/          # 页内输入状态与当前 Session 指针
+        ├── hooks/           # 消息加载（useSessionMessages）、发送（useChat）、刷新恢复（useSessionResume）
+        ├── components/      # 侧边栏、消息展示、输入框与右上角运行日志面板（持久侧栏）
+        └── stores/          # 页内输入状态、当前 Session 指针（刷新保持）与运行日志状态
 ```
 
 文件工具的根目录限定在 `server/` 内——Agent 读写不到 `web/` 与仓库根，`.env`、`.git` 与 `.sessions` 也禁止访问。会话、最终用户/助手消息、上传文件信息和消息—文件关系存于 `server/.data/demo-agent.sqlite3`；每轮 Chat 根据 `session_id` 与 `parent_message_id` 从 SQLite 还原当前消息链，再临时投影成 Chat Completions `items`。历史接口按本轮用户消息关联 `agent_turns` 与 `tool_runs`，在对应助手回复下展示工具名称、耗时及参数/结果短文本（最多约 500 字）；实时事件仍有完整结果。历史账本不记录工具与正文的交错位置，故历史界面在正文前展示工具卡片；模型上下文使用会话摘要与近期用户/助手原文，不把工具账本当成消息。
@@ -195,9 +200,11 @@ demo-agent/
 - **prompt injection 未真正防住**：`web_search` / `fetch_url` 引入的外部内容可能夹带指令，且现在没有任何写入前确认，模型可能被诱导改写文件
 - `write_file` 无确认直接覆盖文件，没有备份或事务，也还没有“读取外部内容后禁止写入”等隔离
 - 上下文使用 `len(text)` 估算预算；滚动摘要可能逐次蒸馏损失早期细节。摘要失败期间只对游标后的原话做截断，未收编的中间段暂时不可见；原始消息仍在 SQLite。单条待收编原文超过单次收编预算时，本轮跳过摘要且游标不动；需调高 `SUMMARY_ABSORB_BUDGET` 才能收编该条。
+- **中断、停止与恢复（消息内联架构）已上线**：助手消息发送即预建（`status`/`finish_kind`/`deadline_at`/`stop_requested` 四列），执行过程实时落 `message_fragments` 表（seq 发号、事件产生即写、先库后内存 Run 广播）。**执行体独立于连接**（`chat_stream.py` 两层分离：`run_executor` 后台线程跑完整轮，`subscribe_stream` 只是订阅者）——刷新/断连不打断执行，resume 随时 attach 回直播；连刷多次页面执行照常跑到终态。`POST /api/sessions/{id}/stop` 协作停止（双层：库字据+内存信号）；`GET /api/sessions/{id}/resume` 三步裁决（204/判死快照/活流回放）；判死只剩两种真实情况：进程重启（Run 不在）与 deadline 超期（180s），判定唯一实现于 `reaper.is_dead_residual`，在 resume 与 send 双入口执行。无自动重试、无自动续跑、无备用模型——流错误直接 error 终态，续跑由用户新消息触发。SSE 新增 `stopped` 与 `resume_snapshot` 事件；`text_delta` 粒度为 fragment 级（~0.5s 攒批）。前端：刷新保持当前会话（localStorage）；SSE 读超时看门狗 30s（半死连接不再永久挂起，超时按断连处理走 resume/报错）；右上角运行日志面板（持久侧栏，轮询 `GET /api/logs`，后端环形缓冲记录开始执行/终态/判死/恢复接管/停止）
 - 没有应用层重试策略；模型请求或流处理异常会转成 `error` 事件，但中断的任务不会自动续跑。可观测性埋点已上线（`agent/metrics.py` + `agent_turns`/`tool_runs` 表 + `chat_messages.meta`）：每轮记录模型请求耗时、流式 usage（智谱接口已验证支持 `include_usage`）与工具执行名/耗时/成败，落库失败只记日志不影响回复；stats 查询接口已上线（GET /api/sessions/{id}/stats 现场聚合），前端已展示会话 stats 和工具执行耗时
-- 300 秒整轮时限只在模型 chunk 边界与工具执行前后检查；已进入阻塞的工具调用无法被强行抢占，超时要等调用返回后才生效
-- HTTP 聊天用进程内标志与锁阻止并发运行；多 worker 或多进程部署不受支持
+- 180 秒整轮时限（`MAX_RUN_SECONDS`，与 `deadline_at` 同值）只在模型 chunk 边界与工具执行前后检查；已进入阻塞的工具调用无法被强行抢占，超时要等调用返回后才生效
+- 停止信号与运行态 Run（`api/stop_signals.py`、`api/active_runs.py`）均在进程内；HTTP 聊天用进程内标志与锁阻止并发运行。多 worker 或多进程部署不受支持——届时停止信号需轮询 `stop_requested` 列、Run 需跨进程共享，表结构已为此预留
+- 恢复回放读进程内 Run（执行在后台线程，断连不终止）；断连后未见 terminal 事件时前端走 resume 重连全量回放，不做自动增量续传（无 Last-Event-ID）；前端 SSE 读超时 30s（看门狗防半死连接永久挂起）
 
 ## 后续计划
 
@@ -219,7 +226,7 @@ demo-agent/
 
 - SQLite 已保存 Session、最终消息、文件及消息—文件关系；当前没有用户账号或跨用户权限模型
 - 同一 Session 用进程内集合拒绝并发 Chat；不同 Session 可并行，但多 worker / 多进程无法共享这把运行锁
-- 客户端断开后用户消息可能已持久化，模型执行是否继续取决于生成器生命周期；尚无任务恢复机制
+- 客户端断开后用户消息可能已持久化；执行在后台线程继续跑完并正常落终态（不再依赖连接存活），恢复走 resume 接管直播
 
 ### 3. 记忆系统（跨会话记忆）
 

@@ -251,7 +251,7 @@ class SessionStoreMixin:
                 return None
             rows = connection.execute(
                 """
-                SELECT id, parent_id, role, status, content, created_at
+                SELECT id, parent_id, role, status, finish_kind, content, created_at
                 FROM chat_messages
                 WHERE session_id = ?
                 ORDER BY id
